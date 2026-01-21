@@ -163,7 +163,7 @@ class HRTFProjectManager(ctk.CTk):
             "base_path": "",
             "project_resolution": "standard", # Default: standard or lowres
             "mesh2hrtf_path": "C:/Mesh2HRTF/mesh2hrtf",
-            "scripts_path": os.getcwd(),       
+            "scripts_path": os.path.dirname(os.path.abspath(__file__)),       
             "grading_bin_path": os.getcwd(),
             "blender_path": "", 
             "eval_grid": "",                   
@@ -229,7 +229,8 @@ class HRTFProjectManager(ctk.CTk):
         btn_refresh_grids = ctk.CTkButton(self.frame_config, text="Scan Grids", width=80, command=self.scan_eval_grids)
         btn_refresh_grids.grid(row=2, column=2, padx=10, pady=10)
 
-        self.add_config_row(3, "Scripts Location:", "entry_scripts", os.getcwd(), browse_cmd=self.browse_scripts)
+        # UPDATED: Scripts Location replaced with Blender Path
+        self.add_config_row(3, "Blender Executable:", "entry_blender", "Path to blender.exe...", browse_cmd=self.browse_blender)
         self.add_config_row(4, "Grading Tool Bin:", "entry_bins", os.getcwd(), browse_cmd=self.browse_bins)
 
         # --- SECTION 2: WORKFLOW ACTIONS ---
@@ -275,9 +276,6 @@ class HRTFProjectManager(ctk.CTk):
 
         self.frame_actions.grid_rowconfigure(9, weight=1)
         self.frame_actions.grid_columnconfigure(0, weight=1)
-
-        # self.btn_save = ctk.CTkButton(self, text="Save Project", command=self.save_project_json)
-        # self.btn_save.grid(row=3, column=0, padx=20, pady=10, sticky="e")
 
     def add_config_row(self, row, label_text, attr_name, placeholder, browse_cmd=None):
         lbl = ctk.CTkLabel(self.frame_config, text=label_text)
@@ -489,7 +487,6 @@ class HRTFProjectManager(ctk.CTk):
     # --- BROWSERS ---
     def browse_base(self): self._browse_dir(self.entry_base)
     def browse_m2h(self): self._browse_dir(self.entry_m2h)
-    def browse_scripts(self): self._browse_dir(self.entry_scripts)
     def browse_bins(self): self._browse_dir(self.entry_bins)
     
     def _browse_dir(self, entry_widget):
@@ -499,6 +496,14 @@ class HRTFProjectManager(ctk.CTk):
             entry_widget.insert(0, path)
             self.update_workflow_state()
 
+    def browse_blender(self):
+        # Look for executable (.exe on Windows, anything on Mac/Linux)
+        filetypes = [("Executables", "*.exe"), ("All Files", "*.*")] if sys.platform == "win32" else []
+        path = filedialog.askopenfilename(title="Select Blender Executable", filetypes=filetypes)
+        if path:
+            self.entry_blender.delete(0, "end")
+            self.entry_blender.insert(0, path)
+            self.save_project_json()
 
     # --- Smart move raw mesh to Meshes folder ---
     def browse_raw(self):
@@ -554,14 +559,12 @@ class HRTFProjectManager(ctk.CTk):
             # Launch Custom Dialog
             MoveCopyDialog(self, filename, on_dialog_result)
 
-
-
     # --- STATE MANAGEMENT ---
     def update_ui_from_data(self):
         d = self.project_data
         self.entry_base.delete(0, "end"); self.entry_base.insert(0, d.get("base_path", ""))
         self.entry_m2h.delete(0, "end"); self.entry_m2h.insert(0, d.get("mesh2hrtf_path", ""))
-        self.entry_scripts.delete(0, "end"); self.entry_scripts.insert(0, d.get("scripts_path", ""))
+        self.entry_blender.delete(0, "end"); self.entry_blender.insert(0, d.get("blender_path", ""))
         self.entry_bins.delete(0, "end"); self.entry_bins.insert(0, d.get("grading_bin_path", ""))
         self.entry_raw.delete(0, "end"); self.entry_raw.insert(0, d.get("raw_scan", ""))
         if d.get("eval_grid"): self.combo_grid.set(d.get("eval_grid"))
@@ -585,7 +588,8 @@ class HRTFProjectManager(ctk.CTk):
         self.project_data.update({
             "base_path": self.entry_base.get(),
             "mesh2hrtf_path": self.entry_m2h.get(),
-            "scripts_path": self.entry_scripts.get(),
+            "scripts_path": os.path.dirname(os.path.abspath(__file__)), # AUTO-DETECTED
+            "blender_path": self.entry_blender.get(),
             "grading_bin_path": self.entry_bins.get(),
             "eval_grid": self.combo_grid.get(),
             "raw_scan": self.entry_raw.get()
@@ -659,7 +663,7 @@ class HRTFProjectManager(ctk.CTk):
     # --- WORKFLOW RUNNERS ---
 
     def run_alignment(self):
-        scripts_dir = os.path.normpath(self.entry_scripts.get())
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(scripts_dir, "align_head.py")
         raw_mesh = self.entry_raw.get()
         if not raw_mesh or not os.path.exists(raw_mesh): return self.log("Error: Select a raw mesh first.")
@@ -677,7 +681,7 @@ class HRTFProjectManager(ctk.CTk):
         self.run_external_command(cmd)
 
     def run_processing(self):
-        scripts_dir = os.path.normpath(self.entry_scripts.get())
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(scripts_dir, "process_and_grade.py")
         mesh_dir = self.get_mesh_dir()
         aligned_mesh = os.path.join(mesh_dir, "aligned_head.ply")
@@ -691,14 +695,12 @@ class HRTFProjectManager(ctk.CTk):
         self.run_external_command(cmd)
 
     def run_blender_setup(self):
-        blender_exe = self.project_data.get("blender_path", "")
+        # Prioritize path in entry, then project data
+        blender_exe = self.entry_blender.get()
         if not blender_exe or not os.path.exists(blender_exe):
-            blender_exe = filedialog.askopenfilename(title="Locate blender.exe", filetypes=[("Blender", "blender.exe")])
-            if not blender_exe: return
-            self.project_data["blender_path"] = blender_exe
-            self.save_project_json(silent=True)
+            return self.log("[ERROR] Blender path is invalid. Please configure it above.")
 
-        scripts_dir = os.path.normpath(self.entry_scripts.get())
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(scripts_dir, "setup_blender_scene.py")
         ref_blend = os.path.join(scripts_dir, "3d_reference.blend")
         
@@ -733,7 +735,7 @@ class HRTFProjectManager(ctk.CTk):
         left_proj = os.path.join(base_folder, "Exports", "Left_Project")
         right_proj = os.path.join(base_folder, "Exports", "Right_Project")
         
-        scripts_dir = self.entry_scripts.get()
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
         
         if choice:
             test_script = os.path.join(scripts_dir, "run_numcalc_test.py")
@@ -762,7 +764,7 @@ class HRTFProjectManager(ctk.CTk):
             else:
                 numcalc_arg = numcalc_exe
             
-# --- FIX: Run Full Simulation on Exports Folder ---
+            # --- FIX: Run Full Simulation on Exports Folder ---
             # Targets the 'Exports' directory so manage_numcalc handles both ears
             exports_dir = os.path.join(base_folder, "Exports")
             
@@ -775,7 +777,7 @@ class HRTFProjectManager(ctk.CTk):
         if not m2h_input_root: return self.log("[ERROR] Mesh2HRTF/Mesh2Input not found.")
         m2h_root = self.entry_m2h.get()
 
-        scripts_dir = os.path.normpath(self.entry_scripts.get())
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(scripts_dir, "generate_sofa_outputs.py")
 
         base_folder = os.path.normpath(self.entry_base.get())
@@ -793,7 +795,7 @@ class HRTFProjectManager(ctk.CTk):
         TiltSettingsDialog(self, self.run_extras_script).grab_set()
 
     def run_extras_script(self, tilt_value):
-        scripts_dir = os.path.normpath(self.entry_scripts.get())
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(scripts_dir, "generate_extras.py")
         base_folder = os.path.normpath(self.entry_base.get())
         output_dir = os.path.join(base_folder, "Output")
