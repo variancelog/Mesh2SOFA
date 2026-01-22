@@ -16,16 +16,18 @@ An unofficial Python-based GUI orchestrator for [Mesh2HRTF](https://github.com/M
 
 To use this orchestrator, you must have the following installed:
 
-1.  **Python 3.10+**
-2.  **[Mesh2HRTF](https://sourceforge.net/projects/mesh2hrtf/)** (Installed and binaries accessible).
-3.  **[Blender](https://www.blender.org/)** (For mesh processing).
+1.  **Python 3.10+** including required packages (outlined below)
+2.  **[Mesh2HRTF](https://sourceforge.net/projects/mesh2hrtf/)** including compiled NumCalc and Mesh Grading Tool executables.
+    - NOTE: Make sure to compile NumCalc from source - the Windows binaries on mesh2HRTF tools for Windows are outdated
+3.  **[Blender](https://www.blender.org/)** (For use with Mesh2Input - 4.5 LTS recommended).
+4.  **Python Libraries** 
 
 ## Installation
 
-1.  Clone the repository:
+
+1.  Clone the Mesh2SOFA repository:
     ```bash
-    git clone [https://github.com/variancelog/Mesh2SOFA.git](https://github.com/variancelog/Mesh2SOFA.git)
-    cd Mesh2SOFA
+    git clone https://github.com/variancelog/Mesh2SOFA.git
     ```
 
 2.  Install required Python packages:
@@ -33,7 +35,7 @@ To use this orchestrator, you must have the following installed:
     pip install customtkinter pyvista pymeshlab matplotlib vtk
     ```
 
-3.  **Install the mesh grading tool:**
+3.  **Install/compile the mesh grading tool:**
     * **Windows:** You can install the compiled binaries from [mesh2hrtf-tools](https://sourceforge.net/p/mesh2hrtf-tools/code/ci/master/tree/hrtf_mesh_grading_WindowsExe/).
     * **Mac/Linux:** You must compile the tool from the source code included in your Mesh2HRTF installation.
         * Navigate to: `path/to/Mesh2HRTF/mesh2hrtf/Mesh2Input/Meshes/GradingDistanceBased`
@@ -54,9 +56,10 @@ To use this orchestrator, you must have the following installed:
 3.  **Workflow:**
     * **New Project:** Create a structured folder for your simulation.
     * **Step 1-2:** Select your raw 3D head scan (`.obj` or `.ply`) to align and grade the mesh.
-    * **Step 3:** Launch Blender automatically to inspect the mesh.
+    * **Step 3:** Launch Blender automatically to assign materials to the mesh and generate project folders for NumCalc processing.
     * **Step 5:** Execute the NumCalc simulation.
     * **Step 6:** Generate the final spatially oriented acoustic (SOFA) files.
+    * **Step 7:** Generate the tilted diffuse-field responses (for eq'ing over ear headphones).
 
 ## License
 
