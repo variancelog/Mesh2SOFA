@@ -18,7 +18,8 @@ To use this orchestrator, you must have the following installed:
 
 1.  **Python 3.10+** including required packages (outlined below)
 2.  **[Mesh2HRTF](https://sourceforge.net/projects/mesh2hrtf/)** including compiled NumCalc and Mesh Grading Tool executables.
-    - NOTE: Make sure to compile NumCalc from source - the Windows binaries on mesh2HRTF tools for Windows are outdated
+    - NOTE: Make sure to compile NumCalc from source - the Windows binaries on mesh2HRTF tools for Windows are outdated. 
+    - NumCalc binaries should be in the `NumCalc/bin` folder
 3.  **[Blender](https://www.blender.org/)** (For use with Mesh2Input - 4.5 LTS recommended).
 4.  **Python Libraries** 
 
