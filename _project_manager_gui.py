@@ -155,7 +155,7 @@ class HRTFProjectManager(ctk.CTk):
         super().__init__()
 
         # Window Setup
-        self.title("Mesh2HRTF Orchestrator")
+        self.title("Mesh2SOFA (Mesh2HRTF Orchestrator)")
         self.geometry("900x970")
         
         # Data State
