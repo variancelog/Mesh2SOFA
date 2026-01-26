@@ -43,6 +43,8 @@ To use this orchestrator, you must have the following installed:
 
 ## Usage
 
+Video tutorial is available [on YouTube here >>](https://youtu.be/NH1TiYYrJgk)
+
 1.  Run the main application:
     ```bash
     python _project_manager_gui.py
