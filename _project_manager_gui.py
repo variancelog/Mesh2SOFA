@@ -231,7 +231,7 @@ class HRTFProjectManager(ctk.CTk):
 
         # UPDATED: Scripts Location replaced with Blender Path
         self.add_config_row(3, "Blender Executable:", "entry_blender", "Path to blender.exe...", browse_cmd=self.browse_blender)
-        self.add_config_row(4, "Grading Tool Bin:", "entry_bins", os.getcwd(), browse_cmd=self.browse_bins)
+        self.add_config_row(4, "Mesh Grading Tool Bin:", "entry_bins", os.getcwd(), browse_cmd=self.browse_bins)
 
         # --- SECTION 2: WORKFLOW ACTIONS ---
         self.frame_actions = ctk.CTkFrame(self)
