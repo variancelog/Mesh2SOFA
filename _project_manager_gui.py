@@ -487,7 +487,24 @@ class HRTFProjectManager(ctk.CTk):
     # --- BROWSERS ---
     def browse_base(self): self._browse_dir(self.entry_base)
     def browse_m2h(self): self._browse_dir(self.entry_m2h)
-    def browse_bins(self): self._browse_dir(self.entry_bins)
+    # --- Hopefully now works on both Mac & Windows ---
+    def browse_bins(self):
+        # 1. Determine expected binary name for the title
+        bin_name = "hrtf_mesh_grading.exe" if sys.platform == "win32" else "hrtf_mesh_grading"
+        
+        # 2. Set filetypes
+        if sys.platform == "win32":
+            filetypes = [("Executables", "*.exe"), ("All Files", "*.*")]
+        else:
+            filetypes = [("All Files", "*.*")]
+
+        # 3. Ask for the FILE, not the directory
+        path = filedialog.askopenfilename(title=f"Select {bin_name}", filetypes=filetypes)
+
+        if path:
+            self.entry_bins.delete(0, "end")
+            self.entry_bins.insert(0, path)
+            self.save_project_json()
     
     def _browse_dir(self, entry_widget):
         path = filedialog.askdirectory()
@@ -495,12 +512,26 @@ class HRTFProjectManager(ctk.CTk):
             entry_widget.delete(0, "end")
             entry_widget.insert(0, path)
             self.update_workflow_state()
-
+    
+    # --- Hopefully now works on both Mac & Windows ---
     def browse_blender(self):
-        # Look for executable (.exe on Windows, anything on Mac/Linux)
-        filetypes = [("Executables", "*.exe"), ("All Files", "*.*")] if sys.platform == "win32" else []
+        # 1. Define filetypes based on OS
+        if sys.platform == "win32":
+            filetypes = [("Executables", "*.exe"), ("All Files", "*.*")]
+        else:
+            # On macOS/Linux, allow all files so we can select binaries with no extension
+            filetypes = [("All Files", "*.*")]
+
         path = filedialog.askopenfilename(title="Select Blender Executable", filetypes=filetypes)
+        
         if path:
+            # 2. Smart handling for macOS .app bundles
+            # If the user selected 'Blender.app', we point to the internal binary
+            if sys.platform == "darwin" and path.endswith(".app"):
+                potential_binary = os.path.join(path, "Contents", "MacOS", "Blender")
+                if os.path.exists(potential_binary):
+                    path = potential_binary
+            
             self.entry_blender.delete(0, "end")
             self.entry_blender.insert(0, path)
             self.save_project_json()
@@ -679,14 +710,19 @@ class HRTFProjectManager(ctk.CTk):
         # Added -u for unbuffered output
         cmd = [sys.executable, "-u", script_path, raw_mesh, output_mesh]
         self.run_external_command(cmd)
-
+    
+    # --- Updated to work with new browse_blender and brows_bins functions ---
     def run_processing(self):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(scripts_dir, "process_and_grade.py")
         mesh_dir = self.get_mesh_dir()
         aligned_mesh = os.path.join(mesh_dir, "aligned_head.ply")
-        bin_dir = os.path.normpath(self.entry_bins.get())
-        grading_exe = os.path.join(bin_dir, "hrtf_mesh_grading.exe")
+        # --- Hopefully now works on both Mac & Windows ---
+        grading_exe = self.entry_bins.get()
+        # Fallback: If the user manually entered a folder path, try to find the binary
+        if os.path.isdir(grading_exe):
+            binary_name = "hrtf_mesh_grading.exe" if sys.platform == "win32" else "hrtf_mesh_grading"
+            grading_exe = os.path.join(grading_exe, binary_name)
         
         if not os.path.exists(grading_exe): return self.log(f"Error: Grading binary missing at {grading_exe}")
         
