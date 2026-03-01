@@ -1,0 +1,35 @@
+# --- Python General ---
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+venv/
+
+# --- App Specific Configuration ---
+# Ignores local path settings so others don't overwrite their configs
+project.json
+- run orchestrator.bat
+
+# --- Large Data & Simulation Outputs ---
+# Based on folders created in your create_new_project function
+Exports/
+Output/
+Meshes/
+bin/
+Backup/
+zzMesh2SOFA/
+
+# --- 3D Intermediate Files ---
+# Ignore generated blend files, but keep your 3d_Reference.blend template
+*.blend
+!3d_Reference.blend
+*.blend1
+*.sofa
+*.ply
+*.obj
+*.stl
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
