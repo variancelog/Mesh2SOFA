@@ -11,7 +11,7 @@ A standalone GUI utility for post-processing and mastering SOFA (Spatially Orien
     *   48 kHz - Diffuse-Field Equalized
     *   48 kHz - Non-Diffuse-Field Equalized
 *   **Diffuse Field HRTF (Extras):** Generates specialized outputs for headphone equalization:
-    *   **CSV Exports:** Tilted diffuse-field responses for left, right, and average.
+    *   **CSV Exports:** Diffuse-field responses for left, right, and average with optional tilt.
     *   **Frequency Plots:** Visual representations of the HRTF data.
     *   **Customizable Tilt:** Adjust the Diffuse Field tilt (e.g., -0.8 dB per octave) to match specific target curves.
 *   **Flexible Output:** Save results in the same folder as the input or a custom directory.
