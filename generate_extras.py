@@ -8,6 +8,11 @@ from scipy.spatial import ConvexHull
 import matplotlib.pyplot as plt
 import csv
 
+""" Note: To learn more about how this script computes Diffuse Field HRTF 
+    (DFHRTF) from the SOFA files, please read `readme_dfhrtf_calculation.md 
+    in the repo """
+
+
 # ================= HELPER FUNCTIONS =================
 
 def spherical_to_cartesian(r, az, el):
