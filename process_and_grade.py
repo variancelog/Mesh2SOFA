@@ -56,11 +56,11 @@ def run_processing(aligned_mesh_path, grading_bin_path):
         grad_ratio = "0.30"
         target_mm_base = 1.0 # Slightly coarser intermediate mesh
     else:
-        log("   [MODE] Standard (Max 21kHz) selected.")
+        log("   [MODE] Standard (Max 18kHz) selected.")
         arg_min = "0.5"
         arg_max = "10.0"
         grad_ratio = "0.20"
-        target_mm_base = 0.65
+        target_mm_base = 0.6
 
     # 3. Isotropic Remeshing
     log("   -> Step A: High-Res Isotropic Remeshing...")

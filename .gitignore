@@ -10,6 +10,7 @@ venv/
 # Ignores local path settings so others don't overwrite their configs
 project.json
 - run orchestrator.bat
+# batch_dfhrtf_gui.py
 
 # --- Large Data & Simulation Outputs ---
 # Based on folders created in your create_new_project function

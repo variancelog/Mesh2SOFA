@@ -7,6 +7,7 @@ import scipy.fft as fft
 from scipy.spatial import ConvexHull
 import matplotlib.pyplot as plt
 import csv
+import re
 
 """ Note: To learn more about how this script computes Diffuse Field HRTF 
     (DFHRTF) from the SOFA files, please read `readme_dfhrtf_calculation.md 
@@ -23,7 +24,7 @@ def spherical_to_cartesian(r, az, el):
     z = r * np.sin(el_rad)
     return np.column_stack((x, y, z))
 
-def calculate_geometric_weights(source_pos):
+def calculate_geometric_weights(source_pos, front_bias=0.0):
     """Calculates solid angle weights for spherical integration."""
     az = source_pos[:, 0]
     el = source_pos[:, 1]
@@ -37,9 +38,17 @@ def calculate_geometric_weights(source_pos):
             area = 0.5 * np.linalg.norm(cross_prod)
             weights[simplex] += area / 3.0
         weights /= np.sum(weights)
-        return weights
     except:
-        return np.ones(len(source_pos)) / len(source_pos)
+        weights = np.ones(len(source_pos)) / len(source_pos)
+
+    if front_bias > 0.0:
+        x_coords = cart_coords[:, 0]
+        bias_weights = ((1.0 + x_coords) / 2.0) ** front_bias
+        weights = weights * bias_weights
+        if np.sum(weights) > 0:
+            weights /= np.sum(weights)
+
+    return weights
 
 def generate_fractional_octave_frequencies(start_freq, end_freq, fraction=6):
     """Generates log-spaced frequencies."""
@@ -57,6 +66,29 @@ def apply_spectral_tilt(freqs, magnitude_db, slope_per_octave, ref_freq=1000.0):
     num_octaves = np.log2(freqs / ref_freq)
     tilt_curve = num_octaves * slope_per_octave
     return magnitude_db + tilt_curve
+
+def apply_smoothing(freqs, mags, fraction=24):
+    """Applies 1/fraction octave moving-average smoothing."""
+    smoothed = np.zeros_like(mags)
+    for i, f in enumerate(freqs):
+        f_lower = f / (2**(1/(2*fraction)))
+        f_upper = f * (2**(1/(2*fraction)))
+        mask = (freqs >= f_lower) & (freqs <= f_upper)
+        if np.any(mask):
+            smoothed[i] = np.mean(mags[mask])
+        else:
+            smoothed[i] = mags[i]
+    return smoothed
+
+def save_txt_mono(filename, freqs, mag):
+    """Saves a single channel as tab-delimited text without a header row."""
+    try:
+        with open(filename, 'w', newline='') as txtfile:
+            for f, m in zip(freqs, mag):
+                txtfile.write(f"{f:.6f}\t{m:.3f}\n")
+        print(f"   [+] Saved TXT: {os.path.basename(filename)}")
+    except IOError as e:
+        print(f"[ERROR] Saving TXT: {e}")
 
 def save_csv_mono(filename, freqs, mag):
     """Saves a single channel (Frequency, Magnitude)."""
@@ -87,6 +119,8 @@ def main():
     parser.add_argument("--input", required=True, help="Path to HRIR_48000Hz.sofa")
     parser.add_argument("--output_dir", required=True, help="Output folder")
     parser.add_argument("--tilt", type=float, default=0.0, help="Spectral Tilt (dB/oct)")
+    parser.add_argument("--front_bias", type=float, default=0.0, help="Frontal Spatial Bias")
+    parser.add_argument("--sonicom", action="store_true", help="Enable SONICOM export for Squiglink")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -96,6 +130,7 @@ def main():
     print(f"--- Generating Extras ---")
     print(f"Input: {os.path.basename(args.input)}")
     print(f"Tilt:  {args.tilt} dB/oct")
+    print(f"Front Bias: {args.front_bias}")
 
     # 1. Load Data
     sofa = sf.read_sofa(args.input)
@@ -104,7 +139,7 @@ def main():
     
     # 2. Compute Diffuse Field Response
     print("   -> Calculating Diffuse Field Average...")
-    weights = calculate_geometric_weights(sofa.SourcePosition)
+    weights = calculate_geometric_weights(sofa.SourcePosition, front_bias=args.front_bias)
     n_fft = 16384
     
     # FFT (Measurements, Receivers, Freqs)
@@ -121,12 +156,19 @@ def main():
     
     fft_freqs = np.fft.rfftfreq(n_fft, d=1/fs)
 
-    # 3. Interpolate to 1/6th Octave
-    print("   -> Interpolating to 1/6th Octave...")
-    target_freqs = generate_fractional_octave_frequencies(20, 20000, fraction=6)
-    
-    val_l = np.interp(target_freqs, fft_freqs, avg_db[0])
-    val_r = np.interp(target_freqs, fft_freqs, avg_db[1])
+    # 3. Interpolate
+    if args.sonicom:
+        print("   -> Applying 1/24th Octave Smoothing & Interpolating to 48 PPO...")
+        smoothed_l = apply_smoothing(fft_freqs, avg_db[0], fraction=24)
+        smoothed_r = apply_smoothing(fft_freqs, avg_db[1], fraction=24)
+        target_freqs = generate_fractional_octave_frequencies(20, 20000, fraction=48)
+        val_l = np.interp(target_freqs, fft_freqs, smoothed_l)
+        val_r = np.interp(target_freqs, fft_freqs, smoothed_r)
+    else:
+        print("   -> Interpolating to 1/48th Octave...")
+        target_freqs = generate_fractional_octave_frequencies(20, 20000, fraction=48)
+        val_l = np.interp(target_freqs, fft_freqs, avg_db[0])
+        val_r = np.interp(target_freqs, fft_freqs, avg_db[1])
 
     # 4. Normalize (0 dB at 1 kHz)
     idx_1k = (np.abs(target_freqs - 1000.0)).argmin()
@@ -151,7 +193,10 @@ def main():
     plt.semilogx(target_freqs, val_l, label='Left Ear', linewidth=2, alpha=0.8)
     plt.semilogx(target_freqs, val_r, label='Right Ear', linewidth=2, alpha=0.8, linestyle='--')
     
-    plt.title(f"Diffuse Field HRTF (Normalized)\nSpectral Tilt: {args.tilt} dB/oct")
+    title_str = f"Diffuse Field HRTF (Normalized)\nSpectral Tilt: {args.tilt} dB/oct"
+    if args.front_bias > 0.0:
+        title_str += f" | Front Bias: {args.front_bias}"
+    plt.title(title_str)
     plt.xlabel("Frequency (Hz)")
     plt.ylabel("Magnitude (dB)")
     
@@ -164,28 +209,41 @@ def main():
     
     # --- GET INPUT FILENAME PREFIX ---
     base_name = os.path.splitext(os.path.basename(args.input))[0]
+    bias_str = f"_Bias{args.front_bias}" if args.front_bias > 0.0 else ""
 
-    # Save Plot with TILT in Filename
-    plot_name = f"{base_name}_Response_Tilt{args.tilt}.png"
+    # Save Plot
+    plot_name = f"{base_name}_Response_Tilt{args.tilt}{bias_str}.png"
     plot_path = os.path.join(args.output_dir, plot_name)
     plt.savefig(plot_path, dpi=150)
     print(f"   [+] Saved Plot: {plot_name}")
     plt.close()
 
-    # 8. Save CSVs with TILT in Filename
-    # Left Only
-    name_left = f"{base_name}_Left_Tilt{args.tilt}.csv"
-    save_csv_mono(os.path.join(args.output_dir, name_left), target_freqs, val_l)
+    # 8. Save Output Files
+    if args.sonicom:
+        match = re.search(r'(P\d{4})', base_name)
+        subject_id = match.group(1) if match else base_name
+        
+        name_left = f"SONICOM {args.tilt:g} {subject_id} Measured L.txt"
+        save_txt_mono(os.path.join(args.output_dir, name_left), target_freqs, val_l)
+        
+        name_right = f"SONICOM {args.tilt:g} {subject_id} Measured R.txt"
+        save_txt_mono(os.path.join(args.output_dir, name_right), target_freqs, val_r)
+        
+        print("\n[SUCCESS] SONICOM Extras generated (2 TXTs + Plot).")
+    else:
+        # Left Only
+        name_left = f"{base_name}_Left_Tilt{args.tilt}{bias_str}.csv"
+        save_csv_mono(os.path.join(args.output_dir, name_left), target_freqs, val_l)
+        
+        # Right Only
+        name_right = f"{base_name}_Right_Tilt{args.tilt}{bias_str}.csv"
+        save_csv_mono(os.path.join(args.output_dir, name_right), target_freqs, val_r)
     
-    # Right Only
-    name_right = f"{base_name}_Right_Tilt{args.tilt}.csv"
-    save_csv_mono(os.path.join(args.output_dir, name_right), target_freqs, val_r)
-
-    # Average (Mixed Mono)
-    name_avg = f"{base_name}_Average_Tilt{args.tilt}.csv"
-    save_csv_mono(os.path.join(args.output_dir, name_avg), target_freqs, val_avg)
-
-    print("\n[SUCCESS] Extras generated (3 CSVs + Plot).")
+        # Average (Mixed Mono)
+        name_avg = f"{base_name}_Average_Tilt{args.tilt}{bias_str}.csv"
+        save_csv_mono(os.path.join(args.output_dir, name_avg), target_freqs, val_avg)
+    
+        print("\n[SUCCESS] Extras generated (3 CSVs + Plot).")
 
 if __name__ == "__main__":
     main()

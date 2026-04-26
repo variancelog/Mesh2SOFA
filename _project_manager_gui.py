@@ -53,8 +53,8 @@ class ProjectSettingsDialog(ctk.CTkToplevel):
         self.switch.grid(row=0, column=1, padx=10, pady=15, sticky="e")
         
         self.lbl_desc = ctk.CTkLabel(
-            self.frame, 
-            text="Standard: Max Freq 21kHz (High RAM)\nLowres: Max Freq 16kHz (Lower RAM)",
+            self.frame,
+            text="Standard: Max Freq 18kHz (High RAM)\nLowres: Max Freq 16kHz (Lower RAM)",
             text_color="gray", font=("Roboto", 11)
         )
         self.lbl_desc.grid(row=1, column=0, columnspan=2, padx=10, pady=5)
@@ -150,6 +150,41 @@ class TiltSettingsDialog(ctk.CTkToplevel):
         except ValueError:
             messagebox.showerror("Error", "Please enter a valid number for tilt (e.g. -0.8 or 0).")
 
+class GridSelectionDialog(ctk.CTkToplevel):
+    """Dialog to allow multi-selection of evaluation grids."""
+    def __init__(self, parent, available_grids, selected_grids_str, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.title("Select Evaluation Grids")
+        self.geometry("350x400")
+        
+        self.attributes('-topmost', True)
+        self.focus_force()
+        self.grab_set()
+
+        self.lbl_title = ctk.CTkLabel(self, text="Select Grids to Process:", font=("Roboto", 14, "bold"))
+        self.lbl_title.pack(pady=15)
+
+        self.scroll_frame = ctk.CTkScrollableFrame(self, width=300, height=250)
+        self.scroll_frame.pack(pady=10, padx=20, fill="both", expand=True)
+
+        self.checkboxes = {}
+        selected_list = [g.strip() for g in selected_grids_str.split(",")] if selected_grids_str else []
+
+        for grid in available_grids:
+            var = ctk.StringVar(value="on" if grid in selected_list else "off")
+            cb = ctk.CTkCheckBox(self.scroll_frame, text=grid, variable=var, onvalue="on", offvalue="off")
+            cb.pack(pady=5, anchor="w")
+            self.checkboxes[grid] = var
+
+        self.btn_save = ctk.CTkButton(self, text="Save Selection", fg_color="green", command=self.on_save)
+        self.btn_save.pack(pady=15)
+
+    def on_save(self):
+        selected = [grid for grid, var in self.checkboxes.items() if var.get() == "on"]
+        self.callback(",".join(selected))
+        self.destroy()
+
 class HRTFProjectManager(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -222,12 +257,12 @@ class HRTFProjectManager(ctk.CTk):
         self.add_config_row(0, "Project Folder:", "entry_base", "Select project root...", browse_cmd=self.browse_base)
         self.add_config_row(1, "Mesh2HRTF Root:", "entry_m2h", "C:/Mesh2HRTF", browse_cmd=self.browse_m2h)
         
-        lbl = ctk.CTkLabel(self.frame_config, text="Evaluation Grid:")
+        lbl = ctk.CTkLabel(self.frame_config, text="Evaluation Grid(s):")
         lbl.grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        self.combo_grid = ctk.CTkComboBox(self.frame_config, values=["Set Mesh2HRTF Path first..."])
-        self.combo_grid.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
-        btn_refresh_grids = ctk.CTkButton(self.frame_config, text="Scan Grids", width=80, command=self.scan_eval_grids)
-        btn_refresh_grids.grid(row=2, column=2, padx=10, pady=10)
+        self.entry_grid = ctk.CTkEntry(self.frame_config, placeholder_text="Set Mesh2HRTF Path first...", state="disabled")
+        self.entry_grid.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
+        self.btn_select_grids = ctk.CTkButton(self.frame_config, text="Select Grids", width=80, command=self.open_grid_dialog)
+        self.btn_select_grids.grid(row=2, column=2, padx=10, pady=10)
 
         # UPDATED: Scripts Location replaced with Blender Path
         self.add_config_row(3, "Blender Executable:", "entry_blender", "Path to blender.exe...", browse_cmd=self.browse_blender)
@@ -458,20 +493,34 @@ class HRTFProjectManager(ctk.CTk):
         
         return None
 
-    def scan_eval_grids(self):
+    def get_available_grids(self):
         m2h_input = self.get_valid_m2h_input_path()
-        if not m2h_input: 
-            return self.log("Error: Could not locate 'Mesh2Input' folder in Mesh2HRTF path.")
-            
+        if not m2h_input:
+            self.log("Error: Could not locate 'Mesh2Input' folder in Mesh2HRTF path.")
+            return []
+
         grid_path = os.path.join(m2h_input, "EvaluationGrids", "Data")
-        
+
         if os.path.exists(grid_path):
             folders = [f for f in os.listdir(grid_path) if os.path.isdir(os.path.join(grid_path, f))]
-            self.combo_grid.configure(values=folders)
-            if folders: self.combo_grid.set(folders[0])
-            self.log(f"Found {len(folders)} grids in {grid_path}")
+            return folders
         else:
             self.log(f"Error: Could not find grids at {grid_path}")
+            return []
+
+    def open_grid_dialog(self):
+        available_grids = self.get_available_grids()
+        if not available_grids:
+            return
+            
+        def on_grids_selected(selected_grids_str):
+            self.entry_grid.configure(state="normal")
+            self.entry_grid.delete(0, "end")
+            self.entry_grid.insert(0, selected_grids_str)
+            self.entry_grid.configure(state="disabled")
+            self.save_project_json()
+
+        GridSelectionDialog(self, available_grids, self.entry_grid.get(), on_grids_selected)
 
     def get_binary_path(self, tool_name):
         root = os.path.normpath(self.entry_m2h.get())
@@ -598,7 +647,10 @@ class HRTFProjectManager(ctk.CTk):
         self.entry_blender.delete(0, "end"); self.entry_blender.insert(0, d.get("blender_path", ""))
         self.entry_bins.delete(0, "end"); self.entry_bins.insert(0, d.get("grading_bin_path", ""))
         self.entry_raw.delete(0, "end"); self.entry_raw.insert(0, d.get("raw_scan", ""))
-        if d.get("eval_grid"): self.combo_grid.set(d.get("eval_grid"))
+        self.entry_grid.configure(state="normal")
+        self.entry_grid.delete(0, "end")
+        if d.get("eval_grid"): self.entry_grid.insert(0, d.get("eval_grid"))
+        self.entry_grid.configure(state="disabled")
         self.update_workflow_state()
 
     def load_project_json(self):
@@ -622,7 +674,7 @@ class HRTFProjectManager(ctk.CTk):
             "scripts_path": os.path.dirname(os.path.abspath(__file__)), # AUTO-DETECTED
             "blender_path": self.entry_blender.get(),
             "grading_bin_path": self.entry_bins.get(),
-            "eval_grid": self.combo_grid.get(),
+            "eval_grid": self.entry_grid.get(),
             "raw_scan": self.entry_raw.get()
         })
         if not os.path.exists(self.project_data["base_path"]):
@@ -763,7 +815,7 @@ class HRTFProjectManager(ctk.CTk):
         if not numcalc_exe: return self.log("[ERROR] NumCalc.exe not found.")
         
         res_mode = self.project_data.get("project_resolution", "standard")
-        freq_label = "16 kHz" if res_mode == "lowres" else "21 kHz"
+        freq_label = "16 kHz" if res_mode == "lowres" else "18 kHz"
 
         choice = messagebox.askyesno("Simulation Options", f"Run STABILITY TEST only ({freq_label})?\n\nNo = Run Full Simulation")
         
@@ -835,14 +887,24 @@ class HRTFProjectManager(ctk.CTk):
         script_path = os.path.join(scripts_dir, "generate_extras.py")
         base_folder = os.path.normpath(self.entry_base.get())
         output_dir = os.path.join(base_folder, "Output")
-        input_sofa = os.path.join(output_dir, "HRIR_48000Hz.sofa")
         
-        if not os.path.exists(input_sofa):
-            return self.log(f"[ERROR] Required file missing: {input_sofa}. Please run Step 6 first.")
+        if not os.path.exists(output_dir):
+            return self.log("[ERROR] Output folder missing. Please run Step 6 first.")
+            
+        # Find all 48000Hz sofa files
+        sofa_files = [f for f in os.listdir(output_dir) if f.endswith("48000Hz.sofa")]
         
-        self.log(f"--> Generating Extras (Tilt: {tilt_value})...")
-        cmd = [sys.executable, "-u", script_path, "--input", input_sofa, "--output_dir", output_dir, "--tilt", str(tilt_value)]
-        self.run_external_command(cmd)
+        if not sofa_files:
+            return self.log("[ERROR] No 48000Hz SOFA files found. Please run Step 6 first.")
+            
+        cmds = []
+        for sf_file in sofa_files:
+            input_sofa = os.path.join(output_dir, sf_file)
+            self.log(f"--> Queueing Extras for {sf_file} (Tilt: {tilt_value})...")
+            cmd = [sys.executable, "-u", script_path, "--input", input_sofa, "--output_dir", output_dir, "--tilt", str(tilt_value)]
+            cmds.append(cmd)
+            
+        self.run_sequential_commands(cmds)
 
 if __name__ == "__main__":
     app = HRTFProjectManager()

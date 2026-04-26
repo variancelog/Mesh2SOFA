@@ -40,7 +40,7 @@ def run_project_export(m2h, project_path):
         print(f"[ERROR] Export failed for {project_path}: {e}")
         sys.exit(1)
 
-def find_sofa_in_project(project_path):
+def find_sofas_in_project(project_path):
     out_dir = os.path.join(project_path, "Output2HRTF")
     if not os.path.exists(out_dir):
         out_dir = project_path
@@ -50,12 +50,8 @@ def find_sofa_in_project(project_path):
         print(f"[ERROR] No SOFA files found in {out_dir}")
         sys.exit(1)
     
-    # Prefer files starting with HRIR or HRTF to avoid grabbing temp files
-    chosen = candidates[0]
-    for c in candidates:
-        if "HRIR" in c: chosen = c; break
-        
-    return os.path.join(out_dir, chosen)
+    # Return all files starting with HRIR
+    return [os.path.join(out_dir, c) for c in candidates if "HRIR" in c]
 
 def spherical_to_cartesian(r, az, el):
     az_rad = np.radians(az)
@@ -187,51 +183,6 @@ def merge_sofas(path_l, path_r):
         print("[FATAL] Input SOFAs already have multiple receivers.")
         sys.exit(1)
 
-# 2026-01-20 Backup; 
-#  def main():
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument("--left", required=True)
-#     parser.add_argument("--right", required=True)
-#     parser.add_argument("--m2h_path", required=True)
-#     parser.add_argument("--output", required=True)
-#     args = parser.parse_args()
-
-#     # 1. Import
-#     m2h = ensure_mesh2hrtf_import(args.m2h_path)
-
-#     # 2. Export
-#     print("=== Step 1: Generating Raw SOFA Data ===")
-#     run_project_export(m2h, args.left)
-#     run_project_export(m2h, args.right)
-
-#     # 3. Locate
-#     sofa_l_path = find_sofa_in_project(args.left)
-#     sofa_r_path = find_sofa_in_project(args.right)
-#     print(f"   Left Source: {os.path.basename(sofa_l_path)}")
-#     print(f"   Right Source: {os.path.basename(sofa_r_path)}")
-
-#     # 4. Merge
-#     merged_sofa = merge_sofas(sofa_l_path, sofa_r_path)
-
-#     # 5. Master
-#     print("\n=== Step 2: Mastering Outputs ===")
-#     jobs = [
-#         (44100, False, "44100Hz.sofa"),
-#         (44100, True,  "44100Hz_DFEQ.sofa"),
-#         (48000, False, "48000Hz.sofa"),
-#         (48000, True,  "48000Hz_DFEQ.sofa")
-#     ]
-
-#     for fs, dfeq, suffix in jobs:
-#         out_path = os.path.join(args.output, f"HRIR_{suffix}")
-#         master_sofa(merged_sofa, fs, dfeq, out_path)
-
-#     print("\n[SUCCESS] All files generated.")
-
-# if __name__ == "__main__":
-#     main()
-
-# replaces previous def main (lines 190-231) to accommodate new sofa_mastering_tool.py
 def main():
     parser = argparse.ArgumentParser()
     # Orchestrator args
@@ -245,6 +196,7 @@ def main():
     args = parser.parse_args()
 
     # --- DETERMINE MODE ---
+    targets = []
     if args.input:
         print("=== Standalone Mode: Mastering Single SOFA ===")
         if not os.path.exists(args.input):
@@ -253,6 +205,7 @@ def main():
             
         target_sofa = sf.read_sofa(args.input)
         base_name = os.path.splitext(os.path.basename(args.input))[0]
+        targets.append((target_sofa, base_name))
         
     elif args.left and args.right and args.m2h_path:
         print("=== Orchestrator Mode: Generating and Merging ===")
@@ -262,13 +215,24 @@ def main():
         run_project_export(m2h, args.left)
         run_project_export(m2h, args.right)
 
-        sofa_l_path = find_sofa_in_project(args.left)
-        sofa_r_path = find_sofa_in_project(args.right)
-        print(f"   Left Source: {os.path.basename(sofa_l_path)}")
-        print(f"   Right Source: {os.path.basename(sofa_r_path)}")
+        sofas_l = find_sofas_in_project(args.left)
+        sofas_r = find_sofas_in_project(args.right)
+        
+        pairs = []
+        for sl in sofas_l:
+            for sr in sofas_r:
+                if os.path.basename(sl) == os.path.basename(sr):
+                    pairs.append((sl, sr, os.path.basename(sl)))
 
-        target_sofa = merge_sofas(sofa_l_path, sofa_r_path)
-        base_name = "HRIR" # Standard default for Mesh2SOFA output
+        if not pairs:
+            print("[ERROR] No matching left/right SOFA pairs found.")
+            sys.exit(1)
+
+        for sl, sr, name in pairs:
+            print(f"   Merging Pair: {name}")
+            target_sofa = merge_sofas(sl, sr)
+            base_name = os.path.splitext(name)[0]
+            targets.append((target_sofa, base_name))
         
     else:
         print("[ERROR] Invalid arguments. Provide either --input OR (--left, --right, --m2h_path).")
@@ -283,9 +247,10 @@ def main():
         (48000, True,  "48000Hz_DFEQ.sofa")
     ]
 
-    for fs, dfeq, suffix in jobs:
-        out_path = os.path.join(args.output, f"{base_name}_{suffix}")
-        master_sofa(target_sofa, fs, dfeq, out_path)
+    for target_sofa, base_name in targets:
+        for fs, dfeq, suffix in jobs:
+            out_path = os.path.join(args.output, f"{base_name}_{suffix}")
+            master_sofa(target_sofa, fs, dfeq, out_path)
 
     print("\n[SUCCESS] All files generated.")
 

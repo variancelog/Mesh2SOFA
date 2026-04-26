@@ -20,7 +20,7 @@ class SofaMasteringApp(CTkDnDWrapper):
         super().__init__()
 
         self.title("SOFA Mastering & Extras Tool")
-        self.geometry("600x650")
+        self.geometry("600x700")
         self.resizable(False, False)
 
         # Application Variables
@@ -28,6 +28,7 @@ class SofaMasteringApp(CTkDnDWrapper):
         self.output_mode = ctk.StringVar(value="same") # "same" or "custom"
         self.custom_output_path = ctk.StringVar(value="")
         self.tilt_value = ctk.DoubleVar(value=-0.8)
+        self.bias_value = ctk.DoubleVar(value=0.0)
 
         self.create_widgets()
 
@@ -108,8 +109,17 @@ class SofaMasteringApp(CTkDnDWrapper):
         self.lbl_tilt_val = ctk.CTkLabel(self.frame_df, text="-0.80 dB/oct", width=80)
         self.lbl_tilt_val.grid(row=1, column=2, pady=5, padx=15, sticky="e")
 
+        self.lbl_bias = ctk.CTkLabel(self.frame_df, text="Frontal Spatial Bias:")
+        self.lbl_bias.grid(row=2, column=0, pady=5, padx=15, sticky="w")
+
+        self.slider_bias = ctk.CTkSlider(self.frame_df, from_=0.0, to=4.0, variable=self.bias_value, number_of_steps=40, command=self.update_bias_label)
+        self.slider_bias.grid(row=2, column=1, pady=5, padx=(0, 10), sticky="ew")
+
+        self.lbl_bias_val = ctk.CTkLabel(self.frame_df, text="0.00", width=80)
+        self.lbl_bias_val.grid(row=2, column=2, pady=5, padx=15, sticky="e")
+
         self.btn_run_df = ctk.CTkButton(self.frame_df, text="Generate DFHRTF Files", height=35, fg_color="#28a745", hover_color="#218838", command=self.run_dfhrtf)
-        self.btn_run_df.grid(row=2, column=0, columnspan=3, pady=(15, 10), padx=15, sticky="ew")
+        self.btn_run_df.grid(row=3, column=0, columnspan=3, pady=(15, 10), padx=15, sticky="ew")
 
         self.frame_df.columnconfigure(1, weight=1)
 
@@ -146,6 +156,9 @@ class SofaMasteringApp(CTkDnDWrapper):
 
     def update_tilt_label(self, value):
         self.lbl_tilt_val.configure(text=f"{float(value):.2f} dB/oct")
+
+    def update_bias_label(self, value):
+        self.lbl_bias_val.configure(text=f"{float(value):.2f}")
 
     # --- EXECUTION HELPERS ---
 
@@ -204,6 +217,7 @@ class SofaMasteringApp(CTkDnDWrapper):
         if not input_path: return
 
         tilt_val = round(self.tilt_value.get(), 2)
+        bias_val = round(self.bias_value.get(), 2)
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
         script_extras = os.path.join(scripts_dir, "generate_extras.py")
 
@@ -215,11 +229,12 @@ class SofaMasteringApp(CTkDnDWrapper):
                 sys.executable, "-u", script_extras, 
                 "--input", input_path, 
                 "--output_dir", output_dir, 
-                "--tilt", str(tilt_val)
+                "--tilt", str(tilt_val),
+                "--front_bias", str(bias_val)
             ]
             print("Executing:", " ".join(cmd))
             subprocess.run(cmd, check=True)
-            messagebox.showinfo("Success", f"DFHRTF files generated successfully (Tilt: {tilt_val} dB/oct)!")
+            messagebox.showinfo("Success", f"DFHRTF files generated successfully (Tilt: {tilt_val} dB/oct, Bias: {bias_val})!")
 
         except subprocess.CalledProcessError as e:
             messagebox.showerror("Execution Error", f"Script failed with code: {e.returncode}")

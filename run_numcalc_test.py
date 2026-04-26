@@ -12,7 +12,7 @@ def run_test(project_dir, numcalc_exe):
     base_dir = os.path.dirname(os.path.dirname(project_dir))
     project_json = os.path.join(base_dir, "project.json")
     
-    test_idx = "140" # Default Standard (21kHz)
+    test_idx = "120" # Default Standard (18kHz)
     
     if os.path.exists(project_json):
         try:
@@ -22,7 +22,7 @@ def run_test(project_dir, numcalc_exe):
                     test_idx = "107" # Lowres (16.05kHz)
                     print("   [Mode] Lowres Detected (Target Index: 107)")
                 else:
-                    print("   [Mode] Standard Detected (Target Index: 140)")
+                    print("   [Mode] Standard Detected (Target Index: 120)")
         except:
             print("   [!] Could not read project.json, defaulting to Standard.")
     

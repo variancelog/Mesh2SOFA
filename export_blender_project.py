@@ -94,7 +94,7 @@ def run_smart_export():
         max_freq = 16050
         print(f"Mode: Lowres (Max {max_freq}Hz)")
     else:
-        max_freq = 21000
+        max_freq = 18000
         print(f"Mode: Standard (Max {max_freq}Hz)")
 
     success_count = 0
@@ -115,18 +115,20 @@ def run_smart_export():
         while "Reference" in bpy.data.objects:
             bpy.data.objects.remove(bpy.data.objects["Reference"], do_unlink=True)
 
-        deselect_all_safe() 
-        target_obj.hide_set(False) 
-        target_obj.select_set(True)
-        bpy.context.view_layer.objects.active = target_obj
-        
-        try:
-            bpy.ops.object.duplicate(linked=False)
-        except:
-            pass # Context fallback omitted for brevity, assume safe context
-
-        temp_obj = bpy.context.active_object
+        # Safely duplicate without relying on bpy.ops context
+        temp_obj = target_obj.copy()
+        temp_obj.data = target_obj.data.copy()
+        if target_obj.users_collection:
+            target_obj.users_collection[0].objects.link(temp_obj)
+        else:
+            bpy.context.scene.collection.objects.link(temp_obj)
+            
         temp_obj.name = "Reference" 
+        
+        deselect_all_safe() 
+        temp_obj.hide_set(False) 
+        temp_obj.select_set(True)
+        bpy.context.view_layer.objects.active = temp_obj
         
         final_output_path = os.path.join(export_root, job['folder'])
         
@@ -139,7 +141,7 @@ def run_smart_export():
                 maxFrequency=max_freq, # DYNAMIC
                 frequencyVectorType='Step size',
                 frequencyVectorValue=150,
-                evaluationGrids=config["grid"],
+                evaluationGrids=config["grid"].replace(",", ";"),
                 materialSearchPaths='None',
                 pictures=False,
                 reference=True,
