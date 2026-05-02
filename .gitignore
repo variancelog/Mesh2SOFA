@@ -30,6 +30,7 @@ zzMesh2SOFA/
 *.ply
 *.obj
 *.stl
+zz*
 
 # --- OS Specific ---
 .DS_Store

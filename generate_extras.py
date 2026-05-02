@@ -121,6 +121,7 @@ def main():
     parser.add_argument("--tilt", type=float, default=0.0, help="Spectral Tilt (dB/oct)")
     parser.add_argument("--front_bias", type=float, default=0.0, help="Frontal Spatial Bias")
     parser.add_argument("--sonicom", action="store_true", help="Enable SONICOM export for Squiglink")
+    parser.add_argument("--prefix", type=str, default="", help="Optional file prefix")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -209,10 +210,11 @@ def main():
     
     # --- GET INPUT FILENAME PREFIX ---
     base_name = os.path.splitext(os.path.basename(args.input))[0]
+    prefix_str = f"{args.prefix} " if args.prefix else ""
     bias_str = f"_Bias{args.front_bias}" if args.front_bias > 0.0 else ""
 
     # Save Plot
-    plot_name = f"{base_name}_Response_Tilt{args.tilt}{bias_str}.png"
+    plot_name = f"{prefix_str}{base_name} Tilt {args.tilt} LR.png"
     plot_path = os.path.join(args.output_dir, plot_name)
     plt.savefig(plot_path, dpi=150)
     print(f"   [+] Saved Plot: {plot_name}")
@@ -223,24 +225,24 @@ def main():
         match = re.search(r'(P\d{4})', base_name)
         subject_id = match.group(1) if match else base_name
         
-        name_left = f"SONICOM {args.tilt:g} {subject_id} Measured L.txt"
+        name_left = f"{prefix_str}SONICOM {args.tilt:g} {subject_id} Measured L.txt"
         save_txt_mono(os.path.join(args.output_dir, name_left), target_freqs, val_l)
         
-        name_right = f"SONICOM {args.tilt:g} {subject_id} Measured R.txt"
+        name_right = f"{prefix_str}SONICOM {args.tilt:g} {subject_id} Measured R.txt"
         save_txt_mono(os.path.join(args.output_dir, name_right), target_freqs, val_r)
         
         print("\n[SUCCESS] SONICOM Extras generated (2 TXTs + Plot).")
     else:
         # Left Only
-        name_left = f"{base_name}_Left_Tilt{args.tilt}{bias_str}.csv"
+        name_left = f"{prefix_str}{base_name} {args.tilt:g} L.csv"
         save_csv_mono(os.path.join(args.output_dir, name_left), target_freqs, val_l)
         
         # Right Only
-        name_right = f"{base_name}_Right_Tilt{args.tilt}{bias_str}.csv"
+        name_right = f"{prefix_str}{base_name} {args.tilt:g} R.csv"
         save_csv_mono(os.path.join(args.output_dir, name_right), target_freqs, val_r)
     
         # Average (Mixed Mono)
-        name_avg = f"{base_name}_Average_Tilt{args.tilt}{bias_str}.csv"
+        name_avg = f"{prefix_str}{base_name} {args.tilt:g} Average.csv"
         save_csv_mono(os.path.join(args.output_dir, name_avg), target_freqs, val_avg)
     
         print("\n[SUCCESS] Extras generated (3 CSVs + Plot).")
