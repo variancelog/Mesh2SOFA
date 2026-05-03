@@ -21,12 +21,10 @@ class SofaMasteringApp(CTkDnDWrapper):
 
         self.title("SOFA Mastering & DFHRTF Tool")
         self.geometry("600x700")
-        self.resizable(False, True)
+        self.resizable(True, True)
 
         # Application Variables
         self.input_files = []
-        self.input_file_display = ctk.StringVar(value="")
-        
         self.output_mode = ctk.StringVar(value="same") # "same" or "custom"
         self.custom_output_path = ctk.StringVar(value="")
         
@@ -55,8 +53,10 @@ class SofaMasteringApp(CTkDnDWrapper):
         self.lbl_drop.pack(expand=True)
         self.lbl_drop.bind("<Button-1>", lambda e: self.browse_input_file())
 
-        self.lbl_input_path = ctk.CTkLabel(self, textvariable=self.input_file_display, font=("Roboto", 11), text_color="#2CC985", wraplength=500)
-        self.lbl_input_path.pack(pady=(0, 10), padx=20, fill="x")
+        self.txt_input_path = ctk.CTkTextbox(self, font=("Roboto", 11), text_color="#2CC985", wrap="word", height=30, fg_color="transparent")
+        self.txt_input_path.pack(pady=(0, 10), padx=20, fill="x")
+        self.txt_input_path.configure(state="disabled")
+        self.txt_input_path.bind("<Configure>", self._on_txt_configure)
 
         # ==========================================
         # SECTION 2: MASTERING ZONE
@@ -137,7 +137,7 @@ class SofaMasteringApp(CTkDnDWrapper):
         if valid_files:
             self.input_files = valid_files
             display_text = ", ".join([os.path.basename(f) for f in self.input_files])
-            self.input_file_display.set(display_text)
+            self.update_input_display(display_text)
             self.lbl_drop.configure(text=f"{len(self.input_files)} SOFA file(s) loaded!")
             self.drop_frame.configure(border_color="#2CC985")
             
@@ -152,13 +152,51 @@ class SofaMasteringApp(CTkDnDWrapper):
         if filepaths:
             self.input_files = list(filepaths)
             display_text = ", ".join([os.path.basename(f) for f in self.input_files])
-            self.input_file_display.set(display_text)
+            self.update_input_display(display_text)
             self.lbl_drop.configure(text=f"{len(self.input_files)} SOFA file(s) loaded!")
             self.drop_frame.configure(border_color="#2CC985")
             
             # Enable buttons and set to green
             self.btn_run_mastering.configure(state="normal", fg_color="#28a745", hover_color="#218838")
             self.btn_run_df.configure(state="normal", fg_color="#28a745", hover_color="#218838")
+
+    def update_input_display(self, text):
+        self.txt_input_path.configure(state="normal")
+        self.txt_input_path.delete("1.0", "end")
+        self.txt_input_path.insert("1.0", text)
+        self.txt_input_path.configure(state="disabled")
+        self.after(50, self._adjust_textbox_height)
+
+    def _on_txt_configure(self, event):
+        self.after(50, self._adjust_textbox_height)
+
+    def _adjust_textbox_height(self):
+        try:
+            dlines = self.txt_input_path._textbox.count("1.0", "end", "displaylines")
+            if dlines and isinstance(dlines, tuple):
+                dlines = dlines[0]
+            elif isinstance(dlines, int):
+                pass
+            else:
+                dlines = 1
+        except Exception:
+            dlines = 1
+            
+        if not dlines:
+            dlines = 1
+            
+        new_height = dlines * 18 + 10 # 18px per line approx + padding
+        if new_height > 220:
+            new_height = 220
+        elif new_height < 30:
+            new_height = 30
+            
+        try:
+            current_height = int(float(self.txt_input_path.cget("height")))
+            if abs(current_height - new_height) > 5: # prevent flutter
+                self.txt_input_path.configure(height=new_height)
+        except Exception:
+            self.txt_input_path.configure(height=new_height)
 
     def browse_output_dir(self):
         dirpath = filedialog.askdirectory()

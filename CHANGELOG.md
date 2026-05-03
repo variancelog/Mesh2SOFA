@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-05-03
+
+**1. Sofa Mastering Tool Updates**
+- Enabled horizontal window resizing.
+- Improved the layout when working with multiple SOFA files by upgrading the file list display to a dynamic, wrapping text box that adjusts its height automatically.
+
+## 2026-05-02
+
+**1. Sofa Mastering Tool Updates**
+- Added support for processing multiple SOFA files at once.
+- Removed the standalone `batch_dfhrtf_gui.py` script as batch processing is now natively supported.
+- Restructured SOFA Mastering and DFHRTF outputs sections.
+- Added file prefix option for DFHRTF file outputs.
+- When selecting "Same Folder" for outputs, mastered SOFA files are now saved to a `sofa_mastered` subfolder and DFHRTF files are saved to a `DFHRTF` subfolder.
+- Removed setting for front spatial bias because it turns out not to be very useful.
+- Updated `readme_sofa_mastering_tool.md` to reflect the new functionality.
+
 ## 2026-04-25
 
 **1. Frequency Resolution Updates**
