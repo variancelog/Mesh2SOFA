@@ -8,6 +8,9 @@ import sys
 import threading
 import queue
 
+# For hiding subprocess windows in .pyw mode
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
 # Appearance Settings
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -115,7 +118,7 @@ class MoveCopyDialog(ctk.CTkToplevel):
         self.destroy()
 
 class TiltSettingsDialog(ctk.CTkToplevel):
-    """Popup window for Extras Generation (Spectral Tilt)"""
+    """Popup window for DFHRTF Generation (Spectral Tilt)"""
     def __init__(self, parent, callback):
         super().__init__(parent)
         self.callback = callback
@@ -148,7 +151,7 @@ class TiltSettingsDialog(ctk.CTkToplevel):
             self.callback(val)
             self.destroy()
         except ValueError:
-            messagebox.showerror("Error", "Please enter a valid number for tilt (e.g. -0.8 or 0).")
+            messagebox.showerror("Error", "Please enter a valid number for tilt (e.g. -1.0 or 0).")
 
 class GridSelectionDialog(ctk.CTkToplevel):
     """Dialog to allow multi-selection of evaluation grids."""
@@ -190,17 +193,22 @@ class HRTFProjectManager(ctk.CTk):
         super().__init__()
 
         # Window Setup
-        self.title("Mesh2SOFA (Mesh2HRTF Orchestrator)")
-        self.geometry("900x970")
+        self.title("Mesh2SOFA (Mesh2HRTF GUI)")
+        self.geometry("800x800")
         
+        self.app_settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_settings.json")
+        self.app_settings = {
+            "mesh2hrtf_path": "C:/Mesh2HRTF/mesh2hrtf",
+            "blender_path": "",
+            "grading_bin_path": os.getcwd()
+        }
+        self.load_app_settings()
+
         # Data State
         self.project_data = {
             "base_path": "",
             "project_resolution": "standard", # Default: standard or lowres
-            "mesh2hrtf_path": "C:/Mesh2HRTF/mesh2hrtf",
             "scripts_path": os.path.dirname(os.path.abspath(__file__)),       
-            "grading_bin_path": os.getcwd(),
-            "blender_path": "", 
             "eval_grid": "",                   
             "raw_scan": "",
             "progress": 0 
@@ -218,6 +226,7 @@ class HRTFProjectManager(ctk.CTk):
         self.grid_rowconfigure(2, weight=1) 
         
         self.create_widgets()
+        self.update_ui_from_data()
         
         # Start checking the log queue
         self.check_log_queue()
@@ -227,100 +236,108 @@ class HRTFProjectManager(ctk.CTk):
         self.frame_top = ctk.CTkFrame(self, fg_color="transparent")
         self.frame_top.grid(row=0, column=0, pady=20, padx=20, sticky="ew")
         
-        self.lbl_title = ctk.CTkLabel(self.frame_top, text="No Project Selected", font=("Roboto Medium", 24))
+        self.lbl_title = ctk.CTkLabel(self.frame_top, text="No Project Loaded", font=("Roboto Medium", 24))
         self.lbl_title.pack(side="left")
 
         self.frame_controls = ctk.CTkFrame(self.frame_top, fg_color="transparent")
         self.frame_controls.pack(side="right")
         
-        self.btn_load = ctk.CTkButton(self.frame_controls, text="Save Project", width=100, command=self.save_project_json)
+        self.btn_load = ctk.CTkButton(self.frame_controls, text="Save", width=80, command=self.save_project_json)
         self.btn_load.pack(side="right", padx=5)        
 
         self.btn_refresh = ctk.CTkButton(self.frame_controls, text="↻", width=40, command=self.manual_refresh)
         self.btn_refresh.pack(side="right", padx=5)
         
-        self.btn_load = ctk.CTkButton(self.frame_controls, text="Open Project", width=100, fg_color="#444", command=self.load_project_json)
+        self.btn_load = ctk.CTkButton(self.frame_controls, text="Open", width=80, fg_color="#444", command=self.load_project_json)
         self.btn_load.pack(side="right", padx=5)
+
+        self.btn_new = ctk.CTkButton(self.frame_controls, text="New", width=80, fg_color="#28a745", hover_color="#218838", command=self.create_new_project)
+        self.btn_new.pack(side="right", padx=5)
 
         # SETTINGS BUTTON
         self.btn_settings = ctk.CTkButton(self.frame_controls, text="⚙", width=40, fg_color="#555", command=self.open_settings)
         self.btn_settings.pack(side="right", padx=5)
 
-        self.btn_new = ctk.CTkButton(self.frame_controls, text="New Project", width=100, fg_color="#28a745", hover_color="#218838", command=self.create_new_project)
-        self.btn_new.pack(side="right", padx=5)
-
         # --- SECTION 1: PATHS & CONFIG ---
-        self.frame_config = ctk.CTkFrame(self)
-        self.frame_config.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
-        self.frame_config.grid_columnconfigure(1, weight=1)
-
-        self.add_config_row(0, "Project Folder:", "entry_base", "Select project root...", browse_cmd=self.browse_base)
-        self.add_config_row(1, "Mesh2HRTF Root:", "entry_m2h", "C:/Mesh2HRTF", browse_cmd=self.browse_m2h)
+        self.tabview_config = ctk.CTkTabview(self, height=0)
+        self.tabview_config.grid(row=1, column=0, padx=20, pady=(10, 0), sticky="ew")
         
-        lbl = ctk.CTkLabel(self.frame_config, text="Evaluation Grid(s):")
-        lbl.grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        self.entry_grid = ctk.CTkEntry(self.frame_config, placeholder_text="Set Mesh2HRTF Path first...", state="disabled")
-        self.entry_grid.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
-        self.btn_select_grids = ctk.CTkButton(self.frame_config, text="Select Grids", width=80, command=self.open_grid_dialog)
-        self.btn_select_grids.grid(row=2, column=2, padx=10, pady=10)
+        self.tabview_config.add("  App Settings  ")
+        self.tabview_config.add("  Project Settings  ")
+        self.tabview_config.set("  App Settings  ")
 
-        # UPDATED: Scripts Location replaced with Blender Path
-        self.add_config_row(3, "Blender Executable:", "entry_blender", "Path to blender.exe...", browse_cmd=self.browse_blender)
-        self.add_config_row(4, "Mesh Grading Tool Bin:", "entry_bins", os.getcwd(), browse_cmd=self.browse_bins)
+        tab_app = self.tabview_config.tab("  App Settings  ")
+        tab_app.grid_columnconfigure(1, weight=1)
+        
+        tab_proj = self.tabview_config.tab("  Project Settings  ")
+        tab_proj.grid_columnconfigure(1, weight=1)
+
+        # APP TAB PATH BUTTONS
+        self.add_config_row(0, "Mesh2HRTF Root:", "entry_m2h", "C:/Mesh2HRTF", browse_cmd=self.browse_m2h, parent_frame=tab_app)
+        self.add_config_row(1, "Blender Executable:", "entry_blender", "Path to blender.exe...", browse_cmd=self.browse_blender, parent_frame=tab_app)
+        self.add_config_row(2, "Mesh Grading Tool Bin:", "entry_bins", os.getcwd(), browse_cmd=self.browse_bins, parent_frame=tab_app)
+
+        # PROJECT TAB PATH BUTTONS
+        self.add_config_row(0, "Project Folder:", "entry_base", "Select project root...", browse_cmd=self.browse_base, parent_frame=tab_proj)
+        
+        lbl_grid = ctk.CTkLabel(tab_proj, text="Evaluation Grid(s):")
+        lbl_grid.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        self.entry_grid = ctk.CTkEntry(tab_proj, placeholder_text="Set Mesh2HRTF Path first...", state="disabled")
+        self.entry_grid.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
+        self.btn_select_grids = ctk.CTkButton(tab_proj, text="Select Grids", width=80, command=self.open_grid_dialog)
+        self.btn_select_grids.grid(row=1, column=2, padx=10, pady=5)
+
+        self.add_config_row(2, "Raw Mesh:", "entry_raw", "Select Raw Mesh (.obj/.ply)...", browse_cmd=self.browse_raw, parent_frame=tab_proj)
 
         # --- SECTION 2: WORKFLOW ACTIONS ---
         self.frame_actions = ctk.CTkFrame(self)
-        self.frame_actions.grid(row=2, column=0, padx=20, pady=20, sticky="nsew")
+        self.frame_actions.grid(row=2, column=0, padx=20, pady=(5, 20), sticky="nsew")
         
         self.lbl_workflow = ctk.CTkLabel(self.frame_actions, text="Workflow Steps", font=("Roboto Medium", 18))
-        self.lbl_workflow.grid(row=0, column=0, padx=10, pady=10, sticky="w")
-
-        self.entry_raw = ctk.CTkEntry(self.frame_actions, placeholder_text="Select Raw Mesh (.obj/.ply)...")
-        self.entry_raw.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
-        self.btn_raw = ctk.CTkButton(self.frame_actions, text="Select Mesh", command=self.browse_raw)
-        self.btn_raw.grid(row=1, column=1, padx=10, pady=10)
+        self.lbl_workflow.grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
         # WORKFLOW BUTTONS
         self.btn_align = ctk.CTkButton(self.frame_actions, text="1. Align Head", command=self.run_alignment)
-        self.btn_align.grid(row=2, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.btn_align.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
         
         self.btn_process = ctk.CTkButton(self.frame_actions, text="2. Process & Grade", command=self.run_processing)
-        self.btn_process.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.btn_process.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
         
         self.btn_blender = ctk.CTkButton(self.frame_actions, text="3. Open in Blender (Setup Scene)", command=self.run_blender_setup)
-        self.btn_blender.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.btn_blender.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
         self.btn_export = ctk.CTkButton(self.frame_actions, text="4. Export Project (Manual/Script)", state="disabled", fg_color="gray30", text_color="gray")
-        self.btn_export.grid(row=5, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.btn_export.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
         self.btn_numcalc = ctk.CTkButton(self.frame_actions, text="5. Run NumCalc Simulation", command=self.run_numcalc)
-        self.btn_numcalc.grid(row=6, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.btn_numcalc.grid(row=5, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
         self.btn_sofa = ctk.CTkButton(self.frame_actions, text="6. Generate Mastered SOFA Files", command=self.run_sofa_generation)
-        self.btn_sofa.grid(row=7, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.btn_sofa.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
         self.btn_extras = ctk.CTkButton(self.frame_actions, text="7. Generate Extras", command=self.open_tilt_dialog)
-        self.btn_extras.grid(row=8, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.btn_extras.grid(row=7, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
         # LOGGING AREA
         self.textbox = ctk.CTkTextbox(self.frame_actions, height=150)
-        self.textbox.grid(row=9, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+        self.textbox.grid(row=8, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
         
         self.btn_stop = ctk.CTkButton(self.frame_actions, text="STOP PROCESS", fg_color=COLOR_ERROR, state="disabled", command=self.kill_process)
-        self.btn_stop.grid(row=10, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.btn_stop.grid(row=9, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
-        self.frame_actions.grid_rowconfigure(9, weight=1)
+        self.frame_actions.grid_rowconfigure(8, weight=1)
         self.frame_actions.grid_columnconfigure(0, weight=1)
 
-    def add_config_row(self, row, label_text, attr_name, placeholder, browse_cmd=None):
-        lbl = ctk.CTkLabel(self.frame_config, text=label_text)
-        lbl.grid(row=row, column=0, padx=10, pady=10, sticky="w")
-        entry = ctk.CTkEntry(self.frame_config, placeholder_text=placeholder)
-        entry.grid(row=row, column=1, padx=10, pady=10, sticky="ew")
+    def add_config_row(self, row, label_text, attr_name, placeholder, browse_cmd=None, parent_frame=None):
+        parent = parent_frame if parent_frame else self.frame_config
+        lbl = ctk.CTkLabel(parent, text=label_text)
+        lbl.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+        entry = ctk.CTkEntry(parent, placeholder_text=placeholder)
+        entry.grid(row=row, column=1, padx=10, pady=5, sticky="ew")
         setattr(self, attr_name, entry)
         if browse_cmd:
-            btn = ctk.CTkButton(self.frame_config, text="Browse", width=80, command=browse_cmd)
-            btn.grid(row=row, column=2, padx=10, pady=10)
+            btn = ctk.CTkButton(parent, text="Browse", width=80, command=browse_cmd)
+            btn.grid(row=row, column=2, padx=10, pady=5)
 
     # --- PROCESS & LOGGING ENGINE ---
     
@@ -334,7 +351,7 @@ class HRTFProjectManager(ctk.CTk):
             try:
                 self.current_process = subprocess.Popen(
                     cmd_list, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, universal_newlines=True, shell=shell
+                    text=True, bufsize=1, universal_newlines=True, shell=shell, creationflags=CREATE_NO_WINDOW
                 )
                 for line in iter(self.current_process.stdout.readline, ''):
                     self.log_queue.put(line.strip())
@@ -373,7 +390,7 @@ class HRTFProjectManager(ctk.CTk):
                     
                     self.current_process = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, bufsize=1, universal_newlines=True
+                        text=True, bufsize=1, universal_newlines=True, creationflags=CREATE_NO_WINDOW
                     )
                     
                     for line in iter(self.current_process.stdout.readline, ''):
@@ -419,7 +436,7 @@ class HRTFProjectManager(ctk.CTk):
         
         # FORCE KILL NUMCALC (Windows)
         if sys.platform == 'win32':
-            subprocess.run("taskkill /F /IM NumCalc.exe", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run("taskkill /F /IM NumCalc.exe", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
             self.log("[!] Terminated NumCalc.exe background processes.")
 
     def log(self, message, timestamp=True):
@@ -548,7 +565,12 @@ class HRTFProjectManager(ctk.CTk):
             filetypes = [("All Files", "*.*")]
 
         # 3. Ask for the FILE, not the directory
-        path = filedialog.askopenfilename(title=f"Select {bin_name}", filetypes=filetypes)
+        kwargs = {"title": f"Select {bin_name}", "filetypes": filetypes}
+        current_path = self.entry_bins.get()
+        if current_path and os.path.exists(os.path.dirname(current_path)):
+            kwargs["initialdir"] = os.path.dirname(current_path)
+            
+        path = filedialog.askopenfilename(**kwargs)
 
         if path:
             self.entry_bins.delete(0, "end")
@@ -556,7 +578,14 @@ class HRTFProjectManager(ctk.CTk):
             self.save_project_json()
     
     def _browse_dir(self, entry_widget):
-        path = filedialog.askdirectory()
+        kwargs = {}
+        current_path = entry_widget.get()
+        if current_path and os.path.isdir(current_path):
+            kwargs["initialdir"] = current_path
+        elif current_path and os.path.exists(os.path.dirname(current_path)):
+            kwargs["initialdir"] = os.path.dirname(current_path)
+            
+        path = filedialog.askdirectory(**kwargs)
         if path:
             entry_widget.delete(0, "end")
             entry_widget.insert(0, path)
@@ -571,7 +600,12 @@ class HRTFProjectManager(ctk.CTk):
             # On macOS/Linux, allow all files so we can select binaries with no extension
             filetypes = [("All Files", "*.*")]
 
-        path = filedialog.askopenfilename(title="Select Blender Executable", filetypes=filetypes)
+        kwargs = {"title": "Select Blender Executable", "filetypes": filetypes}
+        current_path = self.entry_blender.get()
+        if current_path and os.path.exists(os.path.dirname(current_path)):
+            kwargs["initialdir"] = os.path.dirname(current_path)
+
+        path = filedialog.askopenfilename(**kwargs)
         
         if path:
             # 2. Smart handling for macOS .app bundles
@@ -592,7 +626,15 @@ class HRTFProjectManager(ctk.CTk):
             return messagebox.showerror("Error", "Please define a Project Folder first.")
 
         # 2. Open File Dialog
-        src_path = filedialog.askopenfilename(filetypes=[("3D Mesh", "*.obj *.ply *.stl")])
+        kwargs = {"filetypes": [("3D Mesh", "*.obj *.ply *.stl")]}
+        current_path = self.entry_raw.get()
+        base_path = self.entry_base.get()
+        if current_path and os.path.exists(os.path.dirname(current_path)):
+            kwargs["initialdir"] = os.path.dirname(current_path)
+        elif base_path and os.path.isdir(base_path):
+            kwargs["initialdir"] = base_path
+            
+        src_path = filedialog.askopenfilename(**kwargs)
         if not src_path: 
             return
 
@@ -640,12 +682,34 @@ class HRTFProjectManager(ctk.CTk):
             MoveCopyDialog(self, filename, on_dialog_result)
 
     # --- STATE MANAGEMENT ---
+    def load_app_settings(self):
+        if os.path.exists(self.app_settings_file):
+            try:
+                with open(self.app_settings_file, 'r') as f:
+                    data = json.load(f)
+                    self.app_settings.update(data)
+            except Exception:
+                pass
+
+    def save_app_settings(self):
+        self.app_settings.update({
+            "mesh2hrtf_path": self.entry_m2h.get(),
+            "blender_path": self.entry_blender.get(),
+            "grading_bin_path": self.entry_bins.get()
+        })
+        try:
+            with open(self.app_settings_file, 'w') as f:
+                json.dump(self.app_settings, f, indent=4)
+        except Exception:
+            pass
+
     def update_ui_from_data(self):
         d = self.project_data
+        app = self.app_settings
         self.entry_base.delete(0, "end"); self.entry_base.insert(0, d.get("base_path", ""))
-        self.entry_m2h.delete(0, "end"); self.entry_m2h.insert(0, d.get("mesh2hrtf_path", ""))
-        self.entry_blender.delete(0, "end"); self.entry_blender.insert(0, d.get("blender_path", ""))
-        self.entry_bins.delete(0, "end"); self.entry_bins.insert(0, d.get("grading_bin_path", ""))
+        self.entry_m2h.delete(0, "end"); self.entry_m2h.insert(0, app.get("mesh2hrtf_path", ""))
+        self.entry_blender.delete(0, "end"); self.entry_blender.insert(0, app.get("blender_path", ""))
+        self.entry_bins.delete(0, "end"); self.entry_bins.insert(0, app.get("grading_bin_path", ""))
         self.entry_raw.delete(0, "end"); self.entry_raw.insert(0, d.get("raw_scan", ""))
         self.entry_grid.configure(state="normal")
         self.entry_grid.delete(0, "end")
@@ -660,6 +724,11 @@ class HRTFProjectManager(ctk.CTk):
             with open(path, 'r') as f:
                 data = json.load(f)
                 self.project_data.update(data)
+                # Cleanup old keys if they exist in a legacy project.json
+                for k in ["mesh2hrtf_path", "blender_path", "grading_bin_path"]:
+                    if k in self.project_data:
+                        del self.project_data[k]
+                
                 if "project_resolution" not in self.project_data:
                     self.project_data["project_resolution"] = "standard"
                 self.update_ui_from_data()
@@ -668,12 +737,11 @@ class HRTFProjectManager(ctk.CTk):
             self.log(f"Error loading project: {e}")
 
     def save_project_json(self, silent=False):
+        self.save_app_settings()
+        
         self.project_data.update({
             "base_path": self.entry_base.get(),
-            "mesh2hrtf_path": self.entry_m2h.get(),
             "scripts_path": os.path.dirname(os.path.abspath(__file__)), # AUTO-DETECTED
-            "blender_path": self.entry_blender.get(),
-            "grading_bin_path": self.entry_bins.get(),
             "eval_grid": self.entry_grid.get(),
             "raw_scan": self.entry_raw.get()
         })
@@ -695,8 +763,11 @@ class HRTFProjectManager(ctk.CTk):
     def update_workflow_state(self):
         base_path = self.entry_base.get()
         proj_name = self.get_project_name()
-        res_mode = self.project_data.get("project_resolution", "standard").upper()
-        self.lbl_title.configure(text=f"Project: {proj_name} [{res_mode}]")
+        
+        if base_path and os.path.isdir(base_path):
+            self.lbl_title.configure(text=proj_name)
+        else:
+            self.lbl_title.configure(text="No Project Loaded")
 
         mesh_path = self.get_mesh_dir()
         
@@ -807,9 +878,8 @@ class HRTFProjectManager(ctk.CTk):
         
         self.log("--> Launching Blender...")
         cmd = [blender_exe, proj_blend, "--python", script_path, "--", mesh_folder]
-        subprocess.Popen(cmd) 
+        subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW)
         self.log("[i] Blender launched separately.")
-
     def run_numcalc(self):
         numcalc_exe = self.get_binary_path("NumCalc")
         if not numcalc_exe: return self.log("[ERROR] NumCalc.exe not found.")

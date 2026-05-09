@@ -45,7 +45,7 @@ To use this orchestrator, you must have the following installed:
 
 1.  Run the main application:
     ```bash
-    python _project_manager_gui.py
+    pythonw _project_manager_gui.pyw
     ```
 
 2.  **Configuration:**
@@ -63,6 +63,7 @@ To use this orchestrator, you must have the following installed:
     * **4. Export Project** is where you run the export script in Blender to create the project files (details below). 
     * **5: Run NumCalc Simulation** Runs multiple instances of NumCalc against your project folders. This step is VERY compute and memory instensive. On a normal home computer, this can take anywhere from 8 to 24 hours. It is recommended to run this on as powerful a computer as possible. You can stop the simulation with the "STOP PROCESS" button; it will stop the processes but not delete the simulation output, so you can pick up where you left off.
     * **6. Generate Mastered SOFA Files** Generates multiple versions of the SOFA files that can be used with binaural rendering plugins such as SPARTA Binauraliser and APL Viruoso. Four versions are generated: diffuse-field equalized and non-diffused field equalized, both in 44.1 kHz and 48 kHz samplerates. Either version can be used with SPARTA (it has a built in optional "Apply Diffuse-Field EQ" setting), but Virtuoso expects a SOFA file that is already diffuse-field equalized.
+      * *Note on sample length:* The standard HRIR output length is 256 samples. If you are importing external measured SOFA files with an unusually long impulse response, you can enable the **"512 sample (edge case use only)"** option to double the processing and output lengths.
     * **7. Generate Extras** generates separate tilted diffuse-field responses as CSV files for left, right, and average. Frequency response plots are also generated. This step allows you to specify a tilt value (e.g. -.8db per octave), and you can run it multiple times to produce and test different outputs. (The way to use these files is to take blocked-ear canal measurements of your headphones, and equalize or convolve them to the tilted diffuse-field response.)
 
 ## Blender Steps

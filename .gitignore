@@ -9,8 +9,6 @@ venv/
 # --- App Specific Configuration ---
 # Ignores local path settings so others don't overwrite their configs
 project.json
-- run orchestrator.bat
-# batch_dfhrtf_gui.py
 
 # --- Large Data & Simulation Outputs ---
 # Based on folders created in your create_new_project function
@@ -20,6 +18,10 @@ Meshes/
 bin/
 Backup/
 zzMesh2SOFA/
+sofa_*/
+plan*/
+*output*/
+projects/
 
 # --- 3D Intermediate Files ---
 # Ignore generated blend files, but keep your 3d_Reference.blend template
@@ -31,6 +33,8 @@ zzMesh2SOFA/
 *.obj
 *.stl
 zz*
+*.bat
+*.png
 
 # --- OS Specific ---
 .DS_Store

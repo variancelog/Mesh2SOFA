@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-05-09
+
+**1. SOFA Mastering Improvements**
+- **Temporal Alignment:** Added an automated onset detection and alignment step to `generate_sofa_outputs.py`. The HRIR peaks are now consistently shifted to sample index 32 prior to padding and cropping. This resolves an issue where delayed datasets (like the LISTEN dataset) were being improperly cropped, resulting in abnormal frequency responses.
+- **Envelope Windowing:** Replaced the simple 16-sample trailing fade with a proper Hann windowing function (8-sample fade-in, 32-sample fade-out) to prevent spectral artifacts and better harmonize the HRIR duration.
+- **Double-Length Option for Edge Cases:** Added a `--double-length` argument to `generate_sofa_outputs.py` which doubles the processing length to 1024 samples and output length to 512 samples to accommodate measured SOFA files with unusually long impulse responses. 
+
+**2. Project Manager GUI (`_project_manager_gui.pyw`) Updates**
+- **Extension Change:** Switched extension from `.py` to `.pyw` to prevent the console window from appearing during execution on Windows.
+- **Tabbed Interface:** Introduced a new tabbed interface to separate App Settings from Project Settings for better organization.
+- **Persistent Settings:** App settings are now saved to `app_settings.json` and persist across sessions.
+- **Path Handling:** Improved file path handling logic for better cross-platform compatibility.
+
+**3. Sofa Mastering Tool (`sofa_mastering_tool.pyw`) Updates**
+- **Extension Change:** Switched extension from `.py` to `.pyw` to prevent the console window from appearing during execution on Windows.
+- **Layout & Console:** Improved the overall layout and integrated a console output text box and an indeterminate progress bar directly into the UI for better visual feedback during execution.
+- **DFHRTF Naming:** Added new naming options in the DFHRTF section, including a "Squigify Output" toggle (to optimize outputs for variancelog.squig.link) and a "Simulated" vs "Measured" tag toggle (also to help manage datasets on squig.link).
+- **Double-Length Option:** Added a new "512 sample (edge case use only)" toggle to the Mastering Zone, which passes the `--double-length` flag down to the underlying python script. 
+
 ## 2026-05-03
 
 **1. Sofa Mastering Tool Updates**

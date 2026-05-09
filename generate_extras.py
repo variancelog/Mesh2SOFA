@@ -120,7 +120,8 @@ def main():
     parser.add_argument("--output_dir", required=True, help="Output folder")
     parser.add_argument("--tilt", type=float, default=0.0, help="Spectral Tilt (dB/oct)")
     parser.add_argument("--front_bias", type=float, default=0.0, help="Frontal Spatial Bias")
-    parser.add_argument("--sonicom", action="store_true", help="Enable SONICOM export for Squiglink")
+    parser.add_argument("--squigify", action="store_true", help="Enable Squiglink optimized DFHRTF outputs")
+    parser.add_argument("--sim_meas", action="store_true", help="Tag output as Simulated instead of Measured")
     parser.add_argument("--prefix", type=str, default="", help="Optional file prefix")
     args = parser.parse_args()
 
@@ -140,7 +141,8 @@ def main():
     
     # 2. Compute Diffuse Field Response
     print("   -> Calculating Diffuse Field Average...")
-    weights = calculate_geometric_weights(sofa.SourcePosition, front_bias=args.front_bias)
+    effective_front_bias = 0.0 if args.squigify else args.front_bias
+    weights = calculate_geometric_weights(sofa.SourcePosition, front_bias=effective_front_bias)
     n_fft = 16384
     
     # FFT (Measurements, Receivers, Freqs)
@@ -158,7 +160,7 @@ def main():
     fft_freqs = np.fft.rfftfreq(n_fft, d=1/fs)
 
     # 3. Interpolate
-    if args.sonicom:
+    if args.squigify:
         print("   -> Applying 1/24th Octave Smoothing & Interpolating to 48 PPO...")
         smoothed_l = apply_smoothing(fft_freqs, avg_db[0], fraction=24)
         smoothed_r = apply_smoothing(fft_freqs, avg_db[1], fraction=24)
@@ -189,60 +191,63 @@ def main():
     # 6. Calculate Average
     val_avg = (val_l + val_r) / 2.0
 
-    # 7. Generate Plot
-    plt.figure(figsize=(10, 6))
-    plt.semilogx(target_freqs, val_l, label='Left Ear', linewidth=2, alpha=0.8)
-    plt.semilogx(target_freqs, val_r, label='Right Ear', linewidth=2, alpha=0.8, linestyle='--')
-    
-    title_str = f"Diffuse Field HRTF (Normalized)\nSpectral Tilt: {args.tilt} dB/oct"
-    if args.front_bias > 0.0:
-        title_str += f" | Front Bias: {args.front_bias}"
-    plt.title(title_str)
-    plt.xlabel("Frequency (Hz)")
-    plt.ylabel("Magnitude (dB)")
-    
-    # Fixed Scale +/- 20 dB
-    plt.ylim(-20, 20)
-    
-    plt.grid(True, which="both", alpha=0.3)
-    plt.legend()
-    plt.xlim(20, 20000)
-    
     # --- GET INPUT FILENAME PREFIX ---
     base_name = os.path.splitext(os.path.basename(args.input))[0]
     prefix_str = f"{args.prefix} " if args.prefix else ""
     bias_str = f"_Bias{args.front_bias}" if args.front_bias > 0.0 else ""
 
-    # Save Plot
-    plot_name = f"{prefix_str}{base_name} Tilt {args.tilt} LR.png"
-    plot_path = os.path.join(args.output_dir, plot_name)
-    plt.savefig(plot_path, dpi=150)
-    print(f"   [+] Saved Plot: {plot_name}")
-    plt.close()
+    # 7. Generate Plot
+    if not args.squigify:
+        plt.figure(figsize=(10, 6))
+        plt.semilogx(target_freqs, val_l, label='Left Ear', linewidth=2, alpha=0.8)
+        plt.semilogx(target_freqs, val_r, label='Right Ear', linewidth=2, alpha=0.8, linestyle='--')
+        
+        title_str = f"Diffuse Field HRTF (Normalized)\nSpectral Tilt: {args.tilt} dB/oct"
+        if args.front_bias > 0.0:
+            title_str += f" | Front Bias: {args.front_bias}"
+        plt.title(title_str)
+        plt.xlabel("Frequency (Hz)")
+        plt.ylabel("Magnitude (dB)")
+        
+        # Fixed Scale +/- 20 dB
+        plt.ylim(-20, 20)
+        
+        plt.grid(True, which="both", alpha=0.3)
+        plt.legend()
+        plt.xlim(20, 20000)
+        
+        # Save Plot
+        plot_name = f"{prefix_str}{base_name} Tilt {args.tilt} LR.png"
+        plot_path = os.path.join(args.output_dir, plot_name)
+        plt.savefig(plot_path, dpi=150)
+        print(f"   [+] Saved Plot: {plot_name}")
+        plt.close()
 
     # 8. Save Output Files
-    if args.sonicom:
+    sim_meas_str = "Simulated" if args.sim_meas else "Measured"
+    
+    if args.squigify:
         match = re.search(r'(P\d{4})', base_name)
         subject_id = match.group(1) if match else base_name
         
-        name_left = f"{prefix_str}SONICOM {args.tilt:g} {subject_id} Measured L.txt"
+        name_left = f"{prefix_str}{args.tilt:g} {base_name} {sim_meas_str} L.txt"
         save_txt_mono(os.path.join(args.output_dir, name_left), target_freqs, val_l)
         
-        name_right = f"{prefix_str}SONICOM {args.tilt:g} {subject_id} Measured R.txt"
+        name_right = f"{prefix_str}{args.tilt:g} {base_name} {sim_meas_str} R.txt"
         save_txt_mono(os.path.join(args.output_dir, name_right), target_freqs, val_r)
         
-        print("\n[SUCCESS] SONICOM Extras generated (2 TXTs + Plot).")
+        print("\n[SUCCESS] Squigified DFHRTF files generated (2 TXTs).")
     else:
         # Left Only
-        name_left = f"{prefix_str}{base_name} {args.tilt:g} L.csv"
+        name_left = f"{prefix_str}{args.tilt:g} {base_name} {sim_meas_str} L.csv"
         save_csv_mono(os.path.join(args.output_dir, name_left), target_freqs, val_l)
         
         # Right Only
-        name_right = f"{prefix_str}{base_name} {args.tilt:g} R.csv"
+        name_right = f"{prefix_str}{args.tilt:g} {base_name} {sim_meas_str} R.csv"
         save_csv_mono(os.path.join(args.output_dir, name_right), target_freqs, val_r)
     
         # Average (Mixed Mono)
-        name_avg = f"{prefix_str}{base_name} {args.tilt:g} Average.csv"
+        name_avg = f"{prefix_str}{args.tilt:g} {base_name} {sim_meas_str} Avg.csv"
         save_csv_mono(os.path.join(args.output_dir, name_avg), target_freqs, val_avg)
     
         print("\n[SUCCESS] Extras generated (3 CSVs + Plot).")

@@ -2,8 +2,13 @@ import customtkinter as ctk
 import os
 import sys
 import subprocess
+import threading
+import queue
 from tkinter import filedialog, messagebox
 from tkinterdnd2 import TkinterDnD, DND_FILES
+
+# For hiding subprocess windows in .pyw mode
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
 # CustomTkinter Theme Settings
 ctk.set_appearance_mode("Dark")
@@ -20,22 +25,30 @@ class SofaMasteringApp(CTkDnDWrapper):
         super().__init__()
 
         self.title("SOFA Mastering & DFHRTF Tool")
-        self.geometry("600x700")
+        self.geometry("800x800")
         self.resizable(True, True)
 
         # Application Variables
         self.input_files = []
         self.output_mode = ctk.StringVar(value="same") # "same" or "custom"
         self.custom_output_path = ctk.StringVar(value="")
+        self.only_48k_value = ctk.BooleanVar(value=False)
+        self.double_length_value = ctk.BooleanVar(value=False)
         
         self.df_output_mode = ctk.StringVar(value="same") # "same" or "custom"
         self.df_custom_output_path = ctk.StringVar(value="")
         self.df_file_prefix = ctk.StringVar(value="")
+        self.df_squigify_value = ctk.BooleanVar(value=False)
+        self.df_sim_meas_value = ctk.BooleanVar(value=False)
         
         self.tilt_value = ctk.DoubleVar(value=-1.0)
         self.bias_value = ctk.DoubleVar(value=0.0)
 
+        self.log_queue = queue.Queue()
+        self.is_running = False
+
         self.create_widgets()
+        self.check_log_queue()
 
     def create_widgets(self):
         # ==========================================
@@ -62,7 +75,7 @@ class SofaMasteringApp(CTkDnDWrapper):
         # SECTION 2: MASTERING ZONE
         # ==========================================
         self.frame_mastering = ctk.CTkFrame(self)
-        self.frame_mastering.pack(pady=10, padx=20, fill="x")
+        self.frame_mastering.pack(pady=5, padx=20, fill="x")
 
         self.lbl_mastering_title = ctk.CTkLabel(self.frame_mastering, text="Mastered SOFA", font=("Roboto Medium", 15))
         self.lbl_mastering_title.grid(row=0, column=0, columnspan=3, pady=(10, 5), padx=15, sticky="w")
@@ -73,17 +86,23 @@ class SofaMasteringApp(CTkDnDWrapper):
         self.btn_run_mastering = ctk.CTkButton(self.frame_mastering, text="Generate Mastered SOFA", height=35, state="disabled", fg_color="#3B8ED0", command=self.run_mastering)
         self.btn_run_mastering.grid(row=1, column=2, pady=(0, 10), padx=15, sticky="e")
 
-        self.radio_same = ctk.CTkRadioButton(self.frame_mastering, text="Same Folder as Input (\\\\sofa_mastered)", variable=self.output_mode, value="same", command=self.toggle_output_state)
+        self.radio_same = ctk.CTkRadioButton(self.frame_mastering, text="Same Folder as Input (\\sofa_mastered)", variable=self.output_mode, value="same", command=self.toggle_output_state)
         self.radio_same.grid(row=2, column=0, columnspan=3, pady=5, padx=15, sticky="w")
 
         self.radio_custom = ctk.CTkRadioButton(self.frame_mastering, text="Selected Folder:", variable=self.output_mode, value="custom", command=self.toggle_output_state)
-        self.radio_custom.grid(row=3, column=0, pady=10, padx=15, sticky="w")
+        self.radio_custom.grid(row=3, column=0, pady=5, padx=15, sticky="w")
 
         self.entry_custom_out = ctk.CTkEntry(self.frame_mastering, textvariable=self.custom_output_path, state="disabled")
-        self.entry_custom_out.grid(row=3, column=1, pady=10, padx=5, sticky="ew")
+        self.entry_custom_out.grid(row=3, column=1, pady=5, padx=5, sticky="ew")
 
         self.btn_browse_out = ctk.CTkButton(self.frame_mastering, text="Browse", width=70, state="disabled", command=self.browse_output_dir)
-        self.btn_browse_out.grid(row=3, column=2, pady=10, padx=15)
+        self.btn_browse_out.grid(row=3, column=2, pady=5, padx=15)
+
+        self.checkbox_only_48k = ctk.CTkCheckBox(self.frame_mastering, text="Only 48kHz (No DFEQ)", variable=self.only_48k_value)
+        self.checkbox_only_48k.grid(row=4, column=0, pady=5, padx=15, sticky="w")
+        
+        self.checkbox_double_length = ctk.CTkCheckBox(self.frame_mastering, text="512 sample (edge case use only)", variable=self.double_length_value)
+        self.checkbox_double_length.grid(row=4, column=1, columnspan=2, pady=5, padx=15, sticky="w")
 
         self.frame_mastering.columnconfigure(1, weight=1)
 
@@ -91,12 +110,12 @@ class SofaMasteringApp(CTkDnDWrapper):
         # SECTION 3: DFHRTF ZONE
         # ==========================================
         self.frame_df = ctk.CTkFrame(self)
-        self.frame_df.pack(pady=10, padx=20, fill="x")
+        self.frame_df.pack(pady=5, padx=20, fill="x")
 
         self.lbl_df_title = ctk.CTkLabel(self.frame_df, text="Diffuse Field HRTF (DFHRTF)", font=("Roboto Medium", 15))
         self.lbl_df_title.grid(row=0, column=0, columnspan=3, pady=(10, 5), padx=15, sticky="w")
 
-        self.radio_df_same = ctk.CTkRadioButton(self.frame_df, text="Same Folder as Input (\\\\DFHRTF)", variable=self.df_output_mode, value="same", command=self.toggle_df_output_state)
+        self.radio_df_same = ctk.CTkRadioButton(self.frame_df, text="Same Folder as Input (\\DFHRTF)", variable=self.df_output_mode, value="same", command=self.toggle_df_output_state)
         self.radio_df_same.grid(row=1, column=0, columnspan=3, pady=5, padx=15, sticky="w")
 
         self.radio_df_custom = ctk.CTkRadioButton(self.frame_df, text="Selected Folder:", variable=self.df_output_mode, value="custom", command=self.toggle_df_output_state)
@@ -123,12 +142,84 @@ class SofaMasteringApp(CTkDnDWrapper):
         self.lbl_tilt_val = ctk.CTkLabel(self.frame_df, text="-1.00 dB/oct", width=80)
         self.lbl_tilt_val.grid(row=4, column=2, pady=5, padx=15, sticky="e")
 
+        self.checkbox_squigify = ctk.CTkCheckBox(self.frame_df, text="Squigify Output (TXT only, no plot)", variable=self.df_squigify_value)
+        self.checkbox_squigify.grid(row=5, column=0, pady=5, padx=15, sticky="w")
+        
+        self.checkbox_sim_meas = ctk.CTkCheckBox(self.frame_df, text="Simulated", variable=self.df_sim_meas_value)
+        self.checkbox_sim_meas.grid(row=5, column=1, pady=5, padx=15, sticky="w")
+
         self.btn_run_df = ctk.CTkButton(self.frame_df, text="Generate DFHRTF Files", height=35, state="disabled", fg_color="#3B8ED0", command=self.run_dfhrtf)
-        self.btn_run_df.grid(row=5, column=0, columnspan=3, pady=(15, 10), padx=15, sticky="ew")
+        self.btn_run_df.grid(row=6, column=0, columnspan=3, pady=(15, 10), padx=15, sticky="ew")
 
         self.frame_df.columnconfigure(1, weight=1)
 
+        # ==========================================
+        # SECTION 4: PROGRESS & LOGGING
+        # ==========================================
+        self.progress_bar = ctk.CTkProgressBar(self, mode="indeterminate")
+        self.progress_bar.pack(pady=(5, 0), padx=20, fill="x")
+        self.progress_bar.set(0)
+
+        self.textbox_log = ctk.CTkTextbox(self, height=100)
+        self.textbox_log.pack(pady=10, padx=20, fill="x")
+        self.textbox_log.configure(state="disabled")
+
     # --- EVENT HANDLERS ---
+
+    def log(self, message):
+        self.textbox_log.configure(state="normal")
+        self.textbox_log.insert("end", f"{message}\n")
+        self.textbox_log.see("end")
+        self.textbox_log.configure(state="disabled")
+
+    def check_log_queue(self):
+        try:
+            while True:
+                msg = self.log_queue.get_nowait()
+                if msg == "DONE":
+                    self.is_running = False
+                    self.progress_bar.stop()
+                    self.progress_bar.set(0)
+                    if self.input_files:
+                        self.btn_run_mastering.configure(state="normal")
+                        self.btn_run_df.configure(state="normal")
+                else:
+                    self.log(msg)
+        except queue.Empty:
+            pass
+        self.after(100, self.check_log_queue)
+
+    def run_external_commands(self, cmd_lists, success_message):
+        if self.is_running: return
+        self.is_running = True
+        self.progress_bar.start()
+        self.btn_run_mastering.configure(state="disabled")
+        self.btn_run_df.configure(state="disabled")
+        self.log("--- Started ---")
+        
+        def target():
+            try:
+                for cmd in cmd_lists:
+                    self.log_queue.put(f"Executing: {' '.join(cmd)}")
+                    process = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, universal_newlines=True, creationflags=CREATE_NO_WINDOW
+                    )
+                    for line in iter(process.stdout.readline, ''):
+                        self.log_queue.put(line.strip())
+                    process.stdout.close()
+                    rc = process.wait()
+                    if rc != 0:
+                        self.log_queue.put(f"[!] Script failed with code {rc}")
+                        break
+                else:
+                    self.log_queue.put(success_message)
+            except Exception as e:
+                self.log_queue.put(f"[!] Execution Error: {str(e)}")
+            finally:
+                self.log_queue.put("DONE")
+                
+        threading.Thread(target=target, daemon=True).start()
 
     def on_file_drop(self, event):
         files = self.tk.splitlist(event.data)
@@ -186,10 +277,10 @@ class SofaMasteringApp(CTkDnDWrapper):
             dlines = 1
             
         new_height = dlines * 18 + 10 # 18px per line approx + padding
-        if new_height > 220:
-            new_height = 220
-        elif new_height < 30:
-            new_height = 30
+        if new_height > 100:
+            new_height = 100
+        elif new_height < 20:
+            new_height = 20
             
         try:
             current_height = int(float(self.txt_input_path.cget("height")))
@@ -291,24 +382,21 @@ class SofaMasteringApp(CTkDnDWrapper):
         if not os.path.exists(script_master):
             return messagebox.showerror("Missing Script", f"Could not find:\n{script_master}")
 
-        try:
-            # NOTE: Update these command arguments to exactly match what 
-            # your standalone generate_sofa_outputs.py script expects!
-            for input_path in self.input_files:
-                output_dir = self.get_output_directory(input_path)
-                cmd = [
-                    sys.executable, "-u", script_master,
-                    "--input", input_path,
-                    "--output", output_dir
-                ]
-                print("Executing:", " ".join(cmd))
-                subprocess.run(cmd, check=True)
-            messagebox.showinfo("Success", "Mastered SOFA files generated successfully!")
+        cmd_lists = []
+        for input_path in self.input_files:
+            output_dir = self.get_output_directory(input_path)
+            cmd = [
+                sys.executable, "-u", script_master,
+                "--input", input_path,
+                "--output", output_dir
+            ]
+            if self.only_48k_value.get():
+                cmd.append("--only-48k")
+            if self.double_length_value.get():
+                cmd.append("--double-length")
+            cmd_lists.append(cmd)
             
-        except subprocess.CalledProcessError as e:
-            messagebox.showerror("Execution Error", f"Script failed with code: {e.returncode}")
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+        self.run_external_commands(cmd_lists, "Mastered SOFA files generated successfully!")
 
     def run_dfhrtf(self):
         if not self.validate_df_paths(): return
@@ -322,26 +410,23 @@ class SofaMasteringApp(CTkDnDWrapper):
         if not os.path.exists(script_extras):
             return messagebox.showerror("Missing Script", f"Could not find:\n{script_extras}")
 
-        try:
-            for input_path in self.input_files:
-                output_dir = self.get_df_output_directory(input_path)
-                cmd = [
-                    sys.executable, "-u", script_extras, 
-                    "--input", input_path, 
-                    "--output_dir", output_dir, 
-                    "--tilt", str(tilt_val),
-                    "--front_bias", str(bias_val)
-                ]
-                if prefix_val:
-                    cmd.extend(["--prefix", prefix_val])
-                print("Executing:", " ".join(cmd))
-                subprocess.run(cmd, check=True)
-            messagebox.showinfo("Success", f"DFHRTF files generated successfully (Tilt: {tilt_val} dB/oct, Bias: {bias_val})!")
+        cmd_lists = []
+        for input_path in self.input_files:
+            output_dir = self.get_df_output_directory(input_path)
+            cmd = [
+                sys.executable, "-u", script_extras, 
+                "--input", input_path, 
+                "--output_dir", output_dir, 
+                "--tilt", str(tilt_val),
+                "--front_bias", str(bias_val)
+            ]
+            if prefix_val:
+                cmd.extend(["--prefix", prefix_val])
+            if self.df_squigify_value.get():
+                cmd.append("--squigify")
+            cmd_lists.append(cmd)
 
-        except subprocess.CalledProcessError as e:
-            messagebox.showerror("Execution Error", f"Script failed with code: {e.returncode}")
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+        self.run_external_commands(cmd_lists, f"DFHRTF files generated successfully (Tilt: {tilt_val} dB/oct, Bias: {bias_val})!")
 
 if __name__ == "__main__":
     app = SofaMasteringApp()

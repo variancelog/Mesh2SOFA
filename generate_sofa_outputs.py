@@ -98,6 +98,26 @@ def master_sofa(raw_sofa, target_fs, apply_dfeq, output_path):
     else:
         print(f"   1. Rate matches ({src_fs:.0f} Hz).")
 
+    # 1.5 Temporal Alignment
+    print("   1.5. Temporal Alignment...")
+    abs_hrirs = np.abs(hrirs)
+    global_peak_idx = np.unravel_index(np.argmax(abs_hrirs), abs_hrirs.shape)[2]
+    target_peak_idx = 32  # Align peak to index 32 (~0.67ms at 48kHz)
+    
+    if global_peak_idx != target_peak_idx:
+        shift_amt = global_peak_idx - target_peak_idx
+        if shift_amt > 0:
+            # Shift left
+            hrirs = hrirs[:, :, shift_amt:]
+        else:
+            # Shift right (pad left)
+            pad_left = -shift_amt
+            hrirs = np.pad(hrirs, ((0,0), (0,0), (pad_left, 0)), mode='constant')
+        N = hrirs.shape[2]
+        print(f"      Shifted IRs by {-shift_amt} samples (peak was at {global_peak_idx}).")
+    else:
+        print("      Peak already aligned.")
+
     # 2. Pad to Processing Length
     if N < PROCESSING_LENGTH:
         pad_amt = PROCESSING_LENGTH - N
@@ -124,11 +144,20 @@ def master_sofa(raw_sofa, target_fs, apply_dfeq, output_path):
 
     # 4. Crop & Fade
     if OUTPUT_LENGTH < N:
-        print(f"   3. Cropping to {OUTPUT_LENGTH} samples...")
+        print(f"   3. Cropping to {OUTPUT_LENGTH} samples and windowing...")
         hrirs = hrirs[:, :, :OUTPUT_LENGTH]
-        fade_len = 16
-        fade_curve = np.hanning(2 * fade_len)[fade_len:] 
-        hrirs[:, :, -fade_len:] *= fade_curve
+        
+        # Fade in
+        fade_in_len = 8
+        if fade_in_len > 0:
+            fade_in_curve = np.hanning(2 * fade_in_len)[:fade_in_len]
+            hrirs[:, :, :fade_in_len] *= fade_in_curve
+            
+        # Fade out
+        fade_out_len = 32
+        if fade_out_len > 0:
+            fade_out_curve = np.hanning(2 * fade_out_len)[fade_out_len:] 
+            hrirs[:, :, -fade_out_len:] *= fade_out_curve
 
     # 5. Normalize
     print(f"   4. Normalizing to {NORM_TARGET_DB} dB...")
@@ -193,7 +222,15 @@ def main():
     parser.add_argument("--input", required=False)
     
     parser.add_argument("--output", required=True)
+    parser.add_argument("--only-48k", action="store_true", help="Generate only the 48kHz un-EQ'd file")
+    parser.add_argument("--double-length", action="store_true", help="Double the processing and output lengths")
     args = parser.parse_args()
+
+    if args.double_length:
+        global PROCESSING_LENGTH, OUTPUT_LENGTH
+        PROCESSING_LENGTH = 1024
+        OUTPUT_LENGTH = 512
+        print("=== Double Length Mode Enabled (1024/512) ===")
 
     # --- DETERMINE MODE ---
     targets = []
@@ -246,6 +283,8 @@ def main():
         (48000, False, "48000Hz.sofa"),
         (48000, True,  "48000Hz_DFEQ.sofa")
     ]
+    if args.only_48k:
+        jobs = [(48000, False, "48000Hz.sofa")]
 
     for target_sofa, base_name in targets:
         for fs, dfeq, suffix in jobs:

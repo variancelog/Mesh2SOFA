@@ -38,22 +38,33 @@ def validate_m2h_path(user_path):
     if os.path.exists(sub_path): 
         return sub_path
     return user_path 
-
 def get_project_settings():
     base_path = bpy.path.abspath("//")
     json_path = os.path.join(base_path, "project.json")
-    
+
+    # Locate app_settings.json next to this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    app_settings_path = os.path.join(script_dir, "app_settings.json")
+
     settings = {
         "m2h_path": DEFAULT_M2H_PATH, 
         "grid": DEFAULT_GRID,
         "resolution": "standard"
     }
-    
+
+    # Load app settings
+    if os.path.exists(app_settings_path):
+        try:
+            with open(app_settings_path, 'r') as f:
+                app_data = json.load(f)
+                settings["m2h_path"] = app_data.get("mesh2hrtf_path", DEFAULT_M2H_PATH)
+        except: pass
+
+    # Load project settings
     if os.path.exists(json_path):
         try:
             with open(json_path, 'r') as f:
                 data = json.load(f)
-                settings["m2h_path"] = data.get("mesh2hrtf_path", DEFAULT_M2H_PATH)
                 settings["grid"] = data.get("eval_grid", DEFAULT_GRID)
                 settings["resolution"] = data.get("project_resolution", "standard")
         except: pass 
