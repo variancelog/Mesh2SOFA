@@ -41,6 +41,13 @@ To use this orchestrator, you must have the following installed:
         * Navigate to: `path/to/Mesh2HRTF/mesh2hrtf/Mesh2Input/Meshes/GradingDistanceBased`
         * Build the project using CMake (referenced by the `CMakeLists.txt` in that folder).
 
+4. **Install the Blender Add-on (Initial Setup only):**
+    * Open Blender.
+    * Go to **Edit > Preferences > Add-ons**.
+    * Click **Install From Disk...** from the mini drop-down menu and select `blender_scripts/blender_export_project.py` from this repository.
+    * Search for "Mesh2SOFA Automation" in the list and enable it by checking the box (it should be checked by default).
+    * The **Mesh2SOFA** panel will now always be available in the 3D Viewport sidebar (press 'N' to open the sidebar that contains the panel, or enable the sidebar from the "View" menu). The panel should be visible by default when running the "Open in Blender" action from Mesh2SOFA.
+
 ## Usage
 
 1.  Run the main application:
@@ -59,8 +66,8 @@ To use this orchestrator, you must have the following installed:
     * **Select Raw Mesh** is where you specify which 3d head scan (`.obj` or `.ply`) you want to use, and whether you want to Move or Copy this mesh to your Project Folder for future processing. In either case, the original mesh is always left intact.
     * **1. Align Mesh** firt alingns your mesh along the axis between your ears and ensures the mesh is facing in the correct direction. It then allows you to fine tune the mesh's rotation so that it is facing level.
     * **2. Process & Grade** first uses PyMeshLab to optimize your mesh for the grading step based on your selected Project resolution (Standard or Low-Res), then uses the Mesh Grading tool to create optimized left and right side meshes recommended for NumCalc processing. 
-    * **3. Open in Blender** opens a reference Blender file that contains the materials and export script needed for generating the project folders used by NumCalc. This step requires the user to assign the materials to the mesh (details below).
-    * **4. Export Project** is where you run the export script in Blender to create the project files (details below). 
+    * **3. Open in Blender** opens a reference Blender file that contains the meshes and materials needed for generating the project folders used by NumCalc.
+    * **4. Setup and Export in Blender** is where you use the Mesh2SOFA panel in Blender to assign materials and export the project files (details below). 
     * **5: Run NumCalc Simulation** Runs multiple instances of NumCalc against your project folders. This step is VERY compute and memory instensive. On a normal home computer, this can take anywhere from 8 to 24 hours. It is recommended to run this on as powerful a computer as possible. You can stop the simulation with the "STOP PROCESS" button; it will stop the processes but not delete the simulation output, so you can pick up where you left off.
     * **6. Generate Mastered SOFA Files** Generates multiple versions of the SOFA files that can be used with binaural rendering plugins such as SPARTA Binauraliser and APL Viruoso. Four versions are generated: diffuse-field equalized and non-diffused field equalized, both in 44.1 kHz and 48 kHz samplerates. Either version can be used with SPARTA (it has a built in optional "Apply Diffuse-Field EQ" setting), but Virtuoso expects a SOFA file that is already diffuse-field equalized.
       * *Note on sample length:* The standard HRIR output length is 256 samples. If you are importing external measured SOFA files with an unusually long impulse response, you can enable the **"512 sample (edge case use only)"** option to double the processing and output lengths.
@@ -68,23 +75,18 @@ To use this orchestrator, you must have the following installed:
 
 ## Blender Steps
 
-In Blender, the first step is assigning materials to the two meshes (`Left_Graded` and `Right_Graded`). For each mesh, do the following:
+Once the Blender Add-on is installed (see Installation step 4), you can use the **Mesh2SOFA** panel in the 3D Viewport sidebar to automate the workflow:
 
-1. Select the mesh. 
-2. In the `Material` window on the bottom right side of Blender, click the `+` button three times to add three material slots.
-3. With the first material slot selected, click the sphere icon (`Browse Material to be Linked`) and select the `Skin` Material. This will apply the skin material to the entire mesh.
-4. Next, add `Left Ear` to the second slot and `Right Ear` to the third slot. NOTE: all three materials must be added to both `Left_Graded` and `Right_Graded` meshes.
-5. Switch from `Object` mode to `Edit` mode, and click the `3` on your keyboard to switch to "Face selection" mode.
-6. Find a triangle near the top-center of the selected mesh's ear opening. This represents the place a blocked-ear microphone would sit if positioned in the ear and should be roughly where the Y axis intersects with your mesh.
-   1. With this face selected, select either the `Left Ear` or `Right Ear` material, depending on the selected mesh, and click `Assign` in the Material window. This will apply that material to the selected face.
-   2. You only need to Assign the `Left Ear` material to the `Left_Graded` mesh and the `Right Ear` material to the `Right_Graded` mesh. The `Right Ear` material will remain unassigned on the Left_Graded mesh and vice versa.
+1. Press **'N'** in the 3D Viewport to open the sidebar if it's not already visible (it should be visible by default after running "Open in Blender" from Mesh2SOFA).
+2. Click the **Mesh2SOFA** tab.
+3. **Step 1: Assign Materials.** Click the `Assign Materials` button. This will automatically:
+   - Create the necessary `Skin`, `Left Ear`, and `Right Ear` materials.
+   - Assign the `Skin` material to the `Left_Graded` and `Right_Graded` meshes.
+   - Automatically find the ear openings and assign the correct ear materials to the single closest face on each mesh.
+   - NOTE: double check that the left and right ear materials are applied to the correct locations (success here depends on the position of the ear canal entrance relative to the tragus shape/size.)
+4. **Step 2: Export Projects.** Click the `Export Projects` button. This will generate the two project folders needed by NumCalc in your project's `Exports` folder.
 
-Once the materials have been to each mesh, switch to the "Scripting" tab.
-1. Click on the `Scripting` tab at the top of Blender.
-2. At the bottom of the left pane, click the `Run Script` button (looks like a "Play" button) to generate the two project folders needed by NumCalc.
-   1. If the export runs successfully, there should be two similar looking folders in your projects "Exports" folder.
-   2. If there are any errors or missing output in the Exports folder, there are likely issues either with one or more of your meshes or materials weren't correctly assigned.
-
+If there are any errors or missing output in the `Exports` folder, check the Blender system console for more details. common issues include the `Left_Graded` or `Right_Graded` meshes being missing from the scene.
 
 ## License
 

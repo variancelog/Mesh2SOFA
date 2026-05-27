@@ -31,7 +31,7 @@ Ensure you have the following installed:
 
 1.  Run the mastering tool:
     ```bash
-    pythonw sofa_mastering_tool.pyw
+    pythonw _sofa_mastering_tool.pyw
     ```
 
 2.  **Process a SOFA file:**

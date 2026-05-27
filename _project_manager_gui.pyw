@@ -860,8 +860,8 @@ class HRTFProjectManager(ctk.CTk):
             return self.log("[ERROR] Blender path is invalid. Please configure it above.")
 
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(scripts_dir, "setup_blender_scene.py")
-        ref_blend = os.path.join(scripts_dir, "3d_reference.blend")
+        script_path = os.path.join(scripts_dir, "blender_scripts", "setup_blender_scene.py")
+        ref_blend = os.path.join(scripts_dir, "3d_Reference.blend")
         
         base_folder = os.path.normpath(self.entry_base.get())
         proj_name = self.get_project_name()
