@@ -153,6 +153,54 @@ class TiltSettingsDialog(ctk.CTkToplevel):
         except ValueError:
             messagebox.showerror("Error", "Please enter a valid number for tilt (e.g. -1.0 or 0).")
 
+class VTKSettingsDialog(ctk.CTkToplevel):
+    """Popup window for VTK Export (Frequency Range)"""
+    def __init__(self, parent, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.title("Generate Paraview VTK Files")
+        self.geometry("400x250")
+        
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus()
+        
+        self.lbl = ctk.CTkLabel(self, text="VTK Export Settings", font=("Roboto Medium", 16))
+        self.lbl.pack(pady=20)
+
+        self.frame = ctk.CTkFrame(self)
+        self.frame.pack(pady=10, padx=20, fill="x")
+
+        # Min Freq
+        self.lbl_min = ctk.CTkLabel(self.frame, text="Min Freq (Hz):")
+        self.lbl_min.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        self.entry_min = ctk.CTkEntry(self.frame, placeholder_text="1000")
+        self.entry_min.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+        self.entry_min.insert(0, "1000")
+
+        # Max Freq
+        self.lbl_max = ctk.CTkLabel(self.frame, text="Max Freq (Hz):")
+        self.lbl_max.grid(row=1, column=0, padx=10, pady=10, sticky="w")
+        self.entry_max = ctk.CTkEntry(self.frame, placeholder_text="16000")
+        self.entry_max.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
+        self.entry_max.insert(0, "16000")
+
+        self.frame.grid_columnconfigure(1, weight=1)
+
+        self.btn_run = ctk.CTkButton(self, text="Generate VTK Files", fg_color="green", command=self.on_confirm)
+        self.btn_run.pack(pady=10, padx=20, fill="x")
+
+    def on_confirm(self):
+        try:
+            min_freq = float(self.entry_min.get())
+            max_freq = float(self.entry_max.get())
+            if min_freq < 0 or max_freq < min_freq:
+                raise ValueError
+            self.callback(min_freq, max_freq)
+            self.destroy()
+        except ValueError:
+            messagebox.showerror("Error", "Please enter valid positive numbers (Min <= Max).")
+
 class GridSelectionDialog(ctk.CTkToplevel):
     """Dialog to allow multi-selection of evaluation grids."""
     def __init__(self, parent, available_grids, selected_grids_str, callback):
@@ -315,17 +363,29 @@ class HRTFProjectManager(ctk.CTk):
         self.btn_sofa = ctk.CTkButton(self.frame_actions, text="6. Generate Mastered SOFA Files", command=self.run_sofa_generation)
         self.btn_sofa.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
-        self.btn_extras = ctk.CTkButton(self.frame_actions, text="7. Generate Extras", command=self.open_tilt_dialog)
-        self.btn_extras.grid(row=7, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        # EXTRAS SECTION
+        self.lbl_extras_spacer = ctk.CTkLabel(self.frame_actions, text="EXTRAS", font=("Roboto Medium", 12))
+        self.lbl_extras_spacer.grid(row=7, column=0, columnspan=2, pady=(10, 0))
+
+        self.frame_extras = ctk.CTkFrame(self.frame_actions, fg_color="transparent")
+        self.frame_extras.grid(row=8, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.frame_extras.grid_columnconfigure(0, weight=1)
+        self.frame_extras.grid_columnconfigure(1, weight=1)
+
+        self.btn_extras = ctk.CTkButton(self.frame_extras, text="Generate DFHRTF Files", command=self.open_tilt_dialog)
+        self.btn_extras.grid(row=0, column=0, padx=(0, 5), sticky="ew")
+
+        self.btn_vtk = ctk.CTkButton(self.frame_extras, text="Generate Paraview VTK Files", command=self.open_vtk_dialog)
+        self.btn_vtk.grid(row=0, column=1, padx=(5, 0), sticky="ew")
 
         # LOGGING AREA
         self.textbox = ctk.CTkTextbox(self.frame_actions, height=150)
-        self.textbox.grid(row=8, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+        self.textbox.grid(row=9, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
         
         self.btn_stop = ctk.CTkButton(self.frame_actions, text="STOP PROCESS", fg_color=COLOR_ERROR, state="disabled", command=self.kill_process)
-        self.btn_stop.grid(row=9, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.btn_stop.grid(row=10, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
-        self.frame_actions.grid_rowconfigure(8, weight=1)
+        self.frame_actions.grid_rowconfigure(9, weight=1)
         self.frame_actions.grid_columnconfigure(0, weight=1)
 
     def add_config_row(self, row, label_text, attr_name, placeholder, browse_cmd=None, parent_frame=None):
@@ -357,7 +417,7 @@ class HRTFProjectManager(ctk.CTk):
                     self.log_queue.put(line.strip())
                 self.current_process.stdout.close()
                 rc = self.current_process.wait()
-                if rc == 0: self.log_queue.put("[✓] Success.")
+                if rc == 0: self.log_queue.put("[+] Success.")
                 else: self.log_queue.put(f"[X] Failed (Code {rc}).")
             except Exception as e:
                 self.log_queue.put(f"[!] Error: {str(e)}")
@@ -811,8 +871,10 @@ class HRTFProjectManager(ctk.CTk):
         
         if step6_done:
             self.btn_extras.configure(state="normal", fg_color=COLOR_ACTIVE, text_color="black")
+            self.btn_vtk.configure(state="normal", fg_color=COLOR_ACTIVE, text_color="black")
         else:
             self.btn_extras.configure(state="disabled", fg_color=COLOR_LOCKED)
+            self.btn_vtk.configure(state="disabled", fg_color=COLOR_LOCKED)
 
     # --- WORKFLOW RUNNERS ---
 
@@ -975,6 +1037,33 @@ class HRTFProjectManager(ctk.CTk):
             cmds.append(cmd)
             
         self.run_sequential_commands(cmds)
+
+    def open_vtk_dialog(self):
+        VTKSettingsDialog(self, self.run_vtk_script).grab_set()
+
+    def run_vtk_script(self, min_freq, max_freq):
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(scripts_dir, "generate_vtk_outputs.py")
+        
+        m2h_root = self.entry_m2h.get()
+        base_folder = os.path.normpath(self.entry_base.get())
+        output_dir = os.path.join(base_folder, "Output")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        left_proj = os.path.join(base_folder, "Exports", "Left_Project")
+        right_proj = os.path.join(base_folder, "Exports", "Right_Project")
+        
+        self.log(f"--> Starting VTK Export ({min_freq}Hz to {max_freq}Hz)...")
+        cmd = [
+            sys.executable, "-u", script_path, 
+            "--left", left_proj, 
+            "--right", right_proj, 
+            "--m2h_path", m2h_root, 
+            "--output", output_dir,
+            "--min_freq", str(min_freq),
+            "--max_freq", str(max_freq)
+        ]
+        self.run_external_command(cmd)
 
 if __name__ == "__main__":
     app = HRTFProjectManager()

@@ -34,7 +34,7 @@ projects/
 *.stl
 zz*
 *.bat
-*.png
+
 
 # --- OS Specific ---
 .DS_Store
