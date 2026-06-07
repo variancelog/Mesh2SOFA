@@ -44,7 +44,7 @@ To use this orchestrator, you must have the following installed:
 4. **Install the Blender Add-on (Initial Setup only):**
     * Open Blender.
     * Go to **Edit > Preferences > Add-ons**.
-    * Click **Install From Disk...** from the mini drop-down menu and select `blender_scripts/blender_export_project.py` from this repository.
+    * Click **Install From Disk...** from the mini drop-down menu and select `blender_scripts/mesh2SOFA_blender_addon.py` from this repository.
     * Search for "Mesh2SOFA Automation" in the list and enable it by checking the box (it should be checked by default).
     * The **Mesh2SOFA** panel will now always be available in the 3D Viewport sidebar (press 'N' to open the sidebar that contains the panel, or enable the sidebar from the "View" menu). The panel should be visible by default when running the "Open in Blender" action from Mesh2SOFA.
 

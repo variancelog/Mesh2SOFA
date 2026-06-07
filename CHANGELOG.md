@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-06-07 (latest)
+
+**1. Fully portable project paths**
+- `base_path` is now derived from the location of `project.json` at load time, overriding whatever absolute path was stored in the file. Moving or renaming the project folder no longer breaks the GUI — just open `project.json` from its new location and all paths resolve correctly. The corrected `base_path` is written back to disk immediately (silent save) so the file self-heals after the first open.
+- `raw_scan` is stored as a path relative to `base_path` (e.g. `Meshes\head.ply`). Together these two changes make the entire project folder freely moveable and renameable without any manual edits to `project.json`.
+
+**2. Resolution mode — radio buttons replace toggle**
+- The Project Settings dialog (`⚙`) now shows two explicit radio buttons — **Standard Mode (Max 18 kHz, High RAM)** and **Lowres Mode (Max 16 kHz, Lower RAM)** — instead of a single on/off toggle. The selected mode is visually obvious without needing a separate description label.
+
+## 2026-06-06
+
+**1. Console-window suppression**
+- **Hidden console:** Added a startup `ctypes` block to `_project_manager_gui.py` that hides the owning console window (via `GetConsoleWindow` + `ShowWindow(SW_HIDE)`). A real console still exists so child processes (NumCalc.exe, external scripts) inherit it silently instead of spawning their own windows. Restores the `.pyw` experience without the subprocess popup problem that prompted the previous `.py` revert.
+- **Hardening:** `run_numcalc_test.py` now passes `creationflags=CREATE_NO_WINDOW` to its `subprocess.run` NumCalc call so it is also clean when run standalone.
+
+**2. Blender add-on renamed**
+- `blender_scripts/blender_export_project.py` → `blender_scripts/mesh2SOFA_blender_addon.py`. Internal `bl_info` name ("Mesh2SOFA Automation") and panel tab ("Mesh2SOFA") are unchanged. **If you have the old add-on installed in Blender:** re-install from the new filename via *Edit > Preferences > Add-ons > Install From Disk...*, then remove/disable the old `blender_export_project` entry.
+
+**3. Blender Skin material color**
+- Changed the `Skin` material `diffuse_color` from pure green `(0, 1, 0, 1)` to warm tan `(0.82, 0.66, 0.49, 1)`.
+
+**4. NumCalc simulation — 3-option dialog + test both ears**
+- Replaced the `messagebox.askyesno` prompt on the **"5. Run NumCalc Simulation"** button with a proper `NumCalcOptionsDialog`. It has three explicit buttons:
+  - **Test Only** — runs the stability test on **both** Left and Right projects in sequence.
+  - **Full Sim** — starts the full simulation as before.
+  - **Cancel** — closes the dialog and does nothing (previously closing the dialog silently launched a full simulation).
+- Fixed the stability test to run `run_numcalc_test.py` against **both** `Left_Project` and `Right_Project` (previously only Left was tested). Uses the existing `run_sequential_commands` runner, which stops on failure and labels each step in the log.
+- Refactored `run_numcalc` into `run_numcalc` + `_run_numcalc_test` + `_run_numcalc_full` helper methods.
+
+**5. "Open in Blender" overwrite/open prompt**
+- Clicking **"3. Open in Blender"** when a project `.blend` file already exists now shows a dialog instead of silently re-importing the graded meshes:
+  - **Open Existing File** — opens the `.blend` as-is (no `setup_blender_scene.py` run, no mesh re-import).
+  - **Overwrite Existing File** — deletes the old `.blend`, copies the reference file fresh, and re-imports `Left_Graded.ply` / `Right_Graded.ply` cleanly (no `.001` duplicates).
+  - **Cancel** — closes the dialog and does nothing.
+- If no `.blend` exists yet, the standard fresh-import flow runs automatically (no dialog).
+- Refactored `run_blender_setup` into `run_blender_setup` + `_launch_blender` helper; added `BlenderOpenDialog` class.
+
+**6. Blender system console now accessible**
+- Blender was previously launched with `CREATE_NO_WINDOW`, which attached a hidden console and blocked Blender's own **Window ▸ Toggle System Console** (its `AllocConsole` call fails when a console is already attached). Blender is now launched with `DETACHED_PROCESS` on Windows so no console is pre-attached and the in-app toggle works on demand — the same behavior as double-clicking Blender normally.
+- All other subprocess calls (NumCalc, grading, python scripts) continue to use `CREATE_NO_WINDOW` so they remain silent.
+
 ## 2026-05-31
 
 **1. VTK Visualization Workflow** (Biggest change overall)

@@ -136,7 +136,7 @@ def setup_materials(obj):
     # assign materials required for Mesh2HRTF
     for idx, (name, color) in enumerate(zip(
             ["Skin", "Left ear", "Right ear"],
-            [(0, 1, 0, 1), (0, 0, 1, 1), (1, 0, 0, 1)])):
+            [(0.82, 0.66, 0.49, 1), (0, 0, 1, 1), (1, 0, 0, 1)])):
 
         # Use existing material or create new
         if name in bpy.data.materials:

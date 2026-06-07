@@ -9,6 +9,7 @@ venv/
 # --- App Specific Configuration ---
 # Ignores local path settings so others don't overwrite their configs
 project.json
+claude.md
 
 # --- Large Data & Simulation Outputs ---
 # Based on folders created in your create_new_project function

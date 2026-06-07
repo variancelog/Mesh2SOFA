@@ -3,6 +3,8 @@ import sys
 import subprocess
 import json
 
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
 def run_test(project_dir, numcalc_exe):
     print(f"\n--- Testing Project: {os.path.basename(project_dir)} ---")
     
@@ -38,7 +40,7 @@ def run_test(project_dir, numcalc_exe):
     print(f"   [>] Executing: {' '.join(cmd)}")
     
     try:
-        result = subprocess.run(cmd, cwd=source_dir, capture_output=False)
+        result = subprocess.run(cmd, cwd=source_dir, capture_output=False, creationflags=CREATE_NO_WINDOW)
         if result.returncode == 0:
             print("   [SUCCESS] Test run completed.")
             return True

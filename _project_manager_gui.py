@@ -7,8 +7,16 @@ import subprocess
 import sys
 import threading
 import queue
+import ctypes
 
-# For hiding subprocess windows in .pyw mode
+# Hide the console window so running as .py looks like .pyw (no terminal).
+# A real (hidden) console still exists, so child processes (e.g. NumCalc.exe)
+# can inherit it without spawning their own console windows.
+if sys.platform == 'win32':
+    _hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+    if _hwnd:
+        ctypes.windll.user32.ShowWindow(_hwnd, 0)  # SW_HIDE
+
 CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
 # Appearance Settings
@@ -28,45 +36,45 @@ class ProjectSettingsDialog(ctk.CTkToplevel):
         super().__init__(parent)
         self.callback = callback
         self.title("Project Settings")
-        self.geometry("400x250")
-        
+        self.geometry("400x230")
+
         self.lift()
         self.attributes("-topmost", True)
         self.focus()
-        
+
         self.lbl = ctk.CTkLabel(self, text="Project Configuration", font=("Roboto Medium", 16))
         self.lbl.pack(pady=15)
 
         self.frame = ctk.CTkFrame(self)
         self.frame.pack(pady=10, padx=20, fill="x")
 
-        # Resolution Switch
+        # Resolution Mode selection
         self.lbl_res = ctk.CTkLabel(self.frame, text="Resolution Mode:", font=("Roboto", 12, "bold"))
-        self.lbl_res.grid(row=0, column=0, padx=10, pady=15, sticky="w")
-        
-        self.switch_var = ctk.StringVar(value=current_res)
-        
-        self.switch = ctk.CTkSwitch(
-            self.frame, 
-            text="Lowres Mode (< 16GB RAM)", 
-            variable=self.switch_var, 
-            onvalue="lowres", 
-            offvalue="standard"
-        )
-        self.switch.grid(row=0, column=1, padx=10, pady=15, sticky="e")
-        
-        self.lbl_desc = ctk.CTkLabel(
+        self.lbl_res.grid(row=0, column=0, columnspan=2, padx=10, pady=(12, 4), sticky="w")
+
+        self.res_var = ctk.StringVar(value=current_res)
+
+        self.radio_standard = ctk.CTkRadioButton(
             self.frame,
-            text="Standard: Max Freq 18kHz (High RAM)\nLowres: Max Freq 16kHz (Lower RAM)",
-            text_color="gray", font=("Roboto", 11)
+            text="Standard Mode  —  Max 18 kHz (High RAM)",
+            variable=self.res_var,
+            value="standard"
         )
-        self.lbl_desc.grid(row=1, column=0, columnspan=2, padx=10, pady=5)
+        self.radio_standard.grid(row=1, column=0, columnspan=2, padx=20, pady=(4, 2), sticky="w")
+
+        self.radio_lowres = ctk.CTkRadioButton(
+            self.frame,
+            text="Lowres Mode  —  Max 16 kHz (Lower RAM)",
+            variable=self.res_var,
+            value="lowres"
+        )
+        self.radio_lowres.grid(row=2, column=0, columnspan=2, padx=20, pady=(2, 12), sticky="w")
 
         self.btn_save = ctk.CTkButton(self, text="Apply Settings", fg_color="green", command=self.on_confirm)
         self.btn_save.pack(pady=20)
 
     def on_confirm(self):
-        self.callback(self.switch_var.get())
+        self.callback(self.res_var.get())
         self.destroy()
 
 class MoveCopyDialog(ctk.CTkToplevel):
@@ -116,6 +124,76 @@ class MoveCopyDialog(ctk.CTkToplevel):
     def on_cancel(self):
         self.result = None
         self.destroy()
+
+class BlenderOpenDialog(ctk.CTkToplevel):
+    """Asks whether to overwrite the existing project .blend or open it as-is."""
+    def __init__(self, parent, proj_name, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.title("Open in Blender")
+        self.geometry("440x190")
+        self.resizable(False, False)
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus()
+        self.grab_set()
+
+        lbl = ctk.CTkLabel(self,
+            text=f"A Blender file for '{proj_name}' already exists.\n\n"
+                 "Open the existing file without changes?\n"
+                 "or Overwrite it (delete and re-import the graded meshes),\n"
+                 ,
+            font=("Roboto", 13))
+        lbl.pack(pady=20, padx=20)
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=10, fill="x")
+
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="transparent", border_width=1,
+                      text_color=("gray10", "#DCE4EE"), command=self.on_cancel).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Overwrite Existing", fg_color="#C0392B",
+                      hover_color="#A93226", command=self.on_overwrite).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Open Existing", fg_color="#2CC985",
+                      hover_color="#209F69", command=self.on_open).pack(side="right", padx=10)
+
+    def on_overwrite(self): self.callback("overwrite"); self.destroy()
+    def on_open(self):      self.callback("open");      self.destroy()
+    def on_cancel(self):    self.destroy()
+
+class NumCalcOptionsDialog(ctk.CTkToplevel):
+    """Asks whether to run a stability test, the full simulation, or cancel."""
+    def __init__(self, parent, freq_label, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.title("Run NumCalc Simulation")
+        self.geometry("460x210")
+        self.resizable(False, False)
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus()
+        self.grab_set()
+
+        lbl = ctk.CTkLabel(self,
+            text=f"Run a quick STABILITY TEST ({freq_label}) on both ears,\n"
+                 "or start the FULL simulation?\n\n"
+                 "(The full simulation is very compute-intensive and\n"
+                 "can take 8-24 hours.)",
+            font=("Roboto", 13))
+        lbl.pack(pady=20, padx=20)
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=10, fill="x")
+
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="transparent", border_width=1,
+                      text_color=("gray10", "#DCE4EE"), command=self.on_cancel).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Full Sim", fg_color="#C0392B",
+                      hover_color="#A93226", command=self.on_full).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Test Only", fg_color="#2CC985",
+                      hover_color="#209F69", command=self.on_test).pack(side="right", padx=10)
+
+    def on_test(self):   self.callback("test"); self.destroy()
+    def on_full(self):   self.callback("full"); self.destroy()
+    def on_cancel(self): self.destroy()
 
 class TiltSettingsDialog(ctk.CTkToplevel):
     """Popup window for DFHRTF Generation (Spectral Tilt)"""
@@ -557,6 +635,23 @@ class HRTFProjectManager(ctk.CTk):
             return meshes_path
         return base_path
 
+    def _rel_to_base(self, abs_path, base):
+        """Convert abs_path to a path relative to base, if it's under base."""
+        try:
+            if abs_path and os.path.isabs(abs_path) and base:
+                rel = os.path.relpath(abs_path, base)
+                if not rel.startswith(".."):   # only if actually inside base
+                    return rel
+        except ValueError:
+            pass  # different drive on Windows — fall through
+        return abs_path
+
+    def _abs_from_base(self, stored, base):
+        """Resolve a stored (possibly relative) raw_scan path back to absolute."""
+        if stored and not os.path.isabs(stored) and base:
+            return os.path.normpath(os.path.join(base, stored))
+        return stored
+
     # --- SMART MESH2HRTF LOGIC ---
     def get_valid_m2h_input_path(self):
         raw_path = self.entry_m2h.get()
@@ -770,7 +865,7 @@ class HRTFProjectManager(ctk.CTk):
         self.entry_m2h.delete(0, "end"); self.entry_m2h.insert(0, app.get("mesh2hrtf_path", ""))
         self.entry_blender.delete(0, "end"); self.entry_blender.insert(0, app.get("blender_path", ""))
         self.entry_bins.delete(0, "end"); self.entry_bins.insert(0, app.get("grading_bin_path", ""))
-        self.entry_raw.delete(0, "end"); self.entry_raw.insert(0, d.get("raw_scan", ""))
+        self.entry_raw.delete(0, "end"); self.entry_raw.insert(0, self._abs_from_base(d.get("raw_scan", ""), d.get("base_path", "")))
         self.entry_grid.configure(state="normal")
         self.entry_grid.delete(0, "end")
         if d.get("eval_grid"): self.entry_grid.insert(0, d.get("eval_grid"))
@@ -788,22 +883,30 @@ class HRTFProjectManager(ctk.CTk):
                 for k in ["mesh2hrtf_path", "blender_path", "grading_bin_path"]:
                     if k in self.project_data:
                         del self.project_data[k]
-                
+
                 if "project_resolution" not in self.project_data:
                     self.project_data["project_resolution"] = "standard"
+
+                # base_path is authoritative from the file's own location, so the
+                # project folder can be moved/renamed without breaking anything.
+                self.project_data["base_path"] = os.path.dirname(os.path.abspath(path))
+
                 self.update_ui_from_data()
                 self.log(f"Loaded project: {path} ({self.project_data['project_resolution']})")
+                # Self-heal: write the corrected base_path back to disk immediately.
+                self.save_project_json(silent=True)
         except Exception as e:
             self.log(f"Error loading project: {e}")
 
     def save_project_json(self, silent=False):
         self.save_app_settings()
         
+        base = self.entry_base.get()
         self.project_data.update({
-            "base_path": self.entry_base.get(),
+            "base_path": base,
             "scripts_path": os.path.dirname(os.path.abspath(__file__)), # AUTO-DETECTED
             "eval_grid": self.entry_grid.get(),
-            "raw_scan": self.entry_raw.get()
+            "raw_scan": self._rel_to_base(self.entry_raw.get(), base)
         })
         if not os.path.exists(self.project_data["base_path"]):
             return
@@ -916,81 +1019,98 @@ class HRTFProjectManager(ctk.CTk):
         self.run_external_command(cmd)
 
     def run_blender_setup(self):
-        # Prioritize path in entry, then project data
         blender_exe = self.entry_blender.get()
         if not blender_exe or not os.path.exists(blender_exe):
             return self.log("[ERROR] Blender path is invalid. Please configure it above.")
 
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(scripts_dir, "blender_scripts", "setup_blender_scene.py")
-        ref_blend = os.path.join(scripts_dir, "3d_Reference.blend")
-        
+        ref_blend   = os.path.join(scripts_dir, "3d_Reference.blend")
         base_folder = os.path.normpath(self.entry_base.get())
-        proj_name = self.get_project_name()
-        proj_blend = os.path.join(base_folder, f"{proj_name}.blend")
-        
-        if not os.path.exists(proj_blend):
+        proj_name   = self.get_project_name()
+        proj_blend  = os.path.join(base_folder, f"{proj_name}.blend")
+
+        if os.path.exists(proj_blend):
+            def on_choice(action):
+                if action == "overwrite":
+                    self._launch_blender(blender_exe, proj_blend, ref_blend, script_path, fresh=True)
+                elif action == "open":
+                    self._launch_blender(blender_exe, proj_blend, ref_blend, script_path, fresh=False)
+            BlenderOpenDialog(self, proj_name, on_choice)
+        else:
+            self._launch_blender(blender_exe, proj_blend, ref_blend, script_path, fresh=True)
+
+    def _launch_blender(self, blender_exe, proj_blend, ref_blend, script_path, fresh):
+        # DETACHED_PROCESS on Windows: no console is attached, so Blender's
+        # Window > Toggle System Console (AllocConsole) works on demand.
+        blender_flags = subprocess.DETACHED_PROCESS if sys.platform == 'win32' else 0
+
+        if fresh:
             try:
+                if os.path.exists(proj_blend):
+                    os.remove(proj_blend)
                 shutil.copy(ref_blend, proj_blend)
-                self.log(f"   [i] Created {proj_name}.blend")
+                self.log(f"   [i] Created {os.path.basename(proj_blend)}")
             except Exception as e:
                 return self.log(f"[ERROR] Copy failed: {e}")
+            mesh_folder = self.get_mesh_dir()
+            cmd = [blender_exe, proj_blend, "--python", script_path, "--", mesh_folder]
+            self.log("--> Launching Blender (fresh import)...")
+        else:
+            cmd = [blender_exe, proj_blend]
+            self.log("--> Opening existing Blender file...")
 
-        mesh_folder = self.get_mesh_dir()
-        
-        self.log("--> Launching Blender...")
-        cmd = [blender_exe, proj_blend, "--python", script_path, "--", mesh_folder]
-        subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW)
+        subprocess.Popen(cmd, creationflags=blender_flags)
         self.log("[i] Blender launched separately.")
+
     def run_numcalc(self):
         numcalc_exe = self.get_binary_path("NumCalc")
         if not numcalc_exe: return self.log("[ERROR] NumCalc.exe not found.")
-        
+
         res_mode = self.project_data.get("project_resolution", "standard")
         freq_label = "16 kHz" if res_mode == "lowres" else "18 kHz"
 
-        choice = messagebox.askyesno("Simulation Options", f"Run STABILITY TEST only ({freq_label})?\n\nNo = Run Full Simulation")
-        
+        def on_choice(action):
+            if action == "test":
+                self._run_numcalc_test(numcalc_exe, freq_label)
+            elif action == "full":
+                self._run_numcalc_full(numcalc_exe, res_mode)
+
+        NumCalcOptionsDialog(self, freq_label, on_choice)
+
+    def _run_numcalc_test(self, numcalc_exe, freq_label):
         base_folder = os.path.normpath(self.entry_base.get())
-        left_proj = os.path.join(base_folder, "Exports", "Left_Project")
-        right_proj = os.path.join(base_folder, "Exports", "Right_Project")
-        
+        left_proj   = os.path.join(base_folder, "Exports", "Left_Project")
+        right_proj  = os.path.join(base_folder, "Exports", "Right_Project")
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        if choice:
-            test_script = os.path.join(scripts_dir, "run_numcalc_test.py")
-            self.log(f"--> Running Stability Test ({freq_label})...")
-            # Stability Test uses python Popen inside script? No, it uses run_external_command.
-            # run_numcalc_test expects arguments.
-            cmd_left = [sys.executable, "-u", test_script, left_proj, numcalc_exe]
-            
-            # For simplicity, we just run the Left Ear test in the main GUI window.
-            self.run_external_command(cmd_left)
-            
+        test_script = os.path.join(scripts_dir, "run_numcalc_test.py")
+
+        self.log(f"--> Running Stability Test on both ears ({freq_label})...")
+        cmd_left  = [sys.executable, "-u", test_script, left_proj,  numcalc_exe]
+        cmd_right = [sys.executable, "-u", test_script, right_proj, numcalc_exe]
+        self.run_sequential_commands([cmd_left, cmd_right])
+
+    def _run_numcalc_full(self, numcalc_exe, res_mode):
+        base_folder = os.path.normpath(self.entry_base.get())
+        self.log(f"--> Starting Full Simulation ({res_mode.upper()})...")
+
+        m2h_input_path = self.get_valid_m2h_input_path()
+        if not m2h_input_path: return self.log("[ERROR] Mesh2Input not found.")
+
+        m2h_root_inner = os.path.dirname(m2h_input_path)
+        full_script = os.path.join(m2h_root_inner, "NumCalc", "manage_numcalc_script.py")
+        if not os.path.exists(full_script): return self.log(f"[ERROR] Script missing: {full_script}")
+
+        # Pass directory on Windows, exe path on other platforms
+        if sys.platform == 'win32':
+            numcalc_arg = os.path.dirname(numcalc_exe)
         else:
-            self.log(f"--> Starting Full Simulation ({res_mode.upper()})...")
-            
-            m2h_input_path = self.get_valid_m2h_input_path()
-            if not m2h_input_path: return self.log("[ERROR] Mesh2Input not found.")
-            
-            m2h_root_inner = os.path.dirname(m2h_input_path) 
-            full_script = os.path.join(m2h_root_inner, "NumCalc", "manage_numcalc_script.py")
-            
-            if not os.path.exists(full_script): return self.log(f"[ERROR] Script missing: {full_script}")
-            
-            # --- FIX: Pass Directory on Windows, Exe on Others ---
-            if sys.platform == 'win32':
-                numcalc_arg = os.path.dirname(numcalc_exe)
-            else:
-                numcalc_arg = numcalc_exe
-            
-            # --- FIX: Run Full Simulation on Exports Folder ---
-            # Targets the 'Exports' directory so manage_numcalc handles both ears
-            exports_dir = os.path.join(base_folder, "Exports")
-            
-            cmd = [sys.executable, "-u", full_script, "--project_path", exports_dir, "--numcalc_path", numcalc_arg]
-            
-            self.run_external_command(cmd)
+            numcalc_arg = numcalc_exe
+
+        # Targets the 'Exports' directory so manage_numcalc handles both ears
+        exports_dir = os.path.join(base_folder, "Exports")
+        cmd = [sys.executable, "-u", full_script, "--project_path", exports_dir, "--numcalc_path", numcalc_arg]
+        self.run_external_command(cmd)
 
     def run_sofa_generation(self):
         m2h_input_root = self.get_valid_m2h_input_path()

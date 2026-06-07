@@ -71,7 +71,7 @@ class VTKViewerApp(QtWidgets.QMainWindow):
 
     def setup_ui(self):
         self.setWindowTitle("Mesh2SOFA VTK Viewer (PySide6)")
-        self.resize(1200, 800)
+        self.resize(900, 800)
         
         # Style the main window
         self.setStyleSheet(f"""

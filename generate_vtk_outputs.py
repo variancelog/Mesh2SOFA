@@ -29,7 +29,7 @@ def get_freq_steps(proj_path, min_freq, max_freq):
     params_path = os.path.join(proj_path, "parameters.json")
     if not os.path.exists(params_path):
         print(f"[!] Warning: {params_path} not found.")
-        return [], {}
+        return [], {}, {}
 
     try:
         with open(params_path, 'r') as f:
@@ -37,7 +37,7 @@ def get_freq_steps(proj_path, min_freq, max_freq):
             freqs = data.get("frequencies", [])
     except Exception as e:
         print(f"[ERROR] Could not read frequencies from {params_path}: {e}")
-        return [], {}
+        return [], {}, {}
 
     valid_steps = []
     valid_freqs = []
@@ -49,18 +49,23 @@ def get_freq_steps(proj_path, min_freq, max_freq):
             valid_freqs.append(freq)
             
     if not valid_steps:
-        return [], {}
+        return [], {}, {}
+
+    # Original Ascending Mapping (for verification)
+    original_map = {}
+    for step, freq in zip(valid_steps, valid_freqs):
+        original_map[step] = freq
 
     # Mesh2HRTF vtk_export function outputs data in REVERSE frequency order 
     # relative to the range. So the lowest step index actually has the highest freq data.
     # We map ascending steps to descending frequencies to correct this.
     reversed_freqs = list(reversed(valid_freqs))
     
-    step_to_freq_map = {}
+    applied_map = {}
     for step, freq in zip(valid_steps, reversed_freqs):
-        step_to_freq_map[step] = freq
+        applied_map[step] = freq
             
-    return valid_steps, step_to_freq_map
+    return valid_steps, applied_map, original_map
 
 def main():
     parser = argparse.ArgumentParser(description="Export Mesh2HRTF simulation results to VTK format.")
@@ -74,7 +79,8 @@ def main():
 
     # 1. Map frequencies to steps
     print(f"--> Analyzing frequency range: {args.min_freq}Hz to {args.max_freq}Hz")
-    steps_to_export, step_to_freq_map = get_freq_steps(args.left, args.min_freq, args.max_freq)
+    # We use the Left project as the reference for mapping (they should be identical)
+    steps_to_export, step_to_freq_map, original_map = get_freq_steps(args.left, args.min_freq, args.max_freq)
     
     if not steps_to_export:
         print("[FATAL] No frequency steps found in the requested range.")
@@ -95,8 +101,8 @@ def main():
     for proj_path, side in [(args.left, "Left"), (args.right, "Right")]:
         print(f"\n=== Processing {side} Project: {os.path.basename(proj_path)} ===")
         
-        # Ensure we have the correct mapping for this side (though they should be identical)
-        side_steps, side_map = get_freq_steps(proj_path, args.min_freq, args.max_freq)
+        # Ensure we have the correct mapping for this side
+        side_steps, side_map, side_original_map = get_freq_steps(proj_path, args.min_freq, args.max_freq)
         if not side_steps:
             print(f"[!] Warning: No steps found for {side} side in range.")
             continue
@@ -125,6 +131,23 @@ def main():
             os.makedirs(os.path.dirname(dst_vtk_dir), exist_ok=True)
             shutil.copytree(src_vtk_dir, dst_vtk_dir)
             
+            # Save mapping for verification
+            mapping_report = {
+                "requested_range_hz": {"min": args.min_freq, "max": args.max_freq},
+                "mesh2hrtf_step_range": {"min_step": min(side_steps), "max_step": max(side_steps)},
+                "total_files_expected": len(side_steps),
+                "original_ascending_mapping": side_original_map,
+                "applied_reversed_mapping_for_renaming": side_map
+            }
+            
+            report_path = os.path.join(dst_vtk_dir, "step_to_freq_map.json")
+            try:
+                with open(report_path, 'w') as f:
+                    json.dump(mapping_report, f, indent=4)
+                print(f"   [+] Verification report saved: {os.path.basename(report_path)}")
+            except Exception as e:
+                print(f"   [!] Could not save verification report: {e}")
+
             # Recursive renaming
             rename_count = 0
             for root, dirs, files in os.walk(dst_vtk_dir):
