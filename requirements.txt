@@ -1,0 +1,25 @@
+# Mesh2SOFA Python dependencies
+# Install with:  pip install -r requirements.txt
+#
+# NOTE: Two required dependencies are NOT installed via pip:
+#   - mesh2hrtf : provided by your external Mesh2HRTF installation
+#   - bpy/bmesh : provided by Blender's bundled Python (blender_scripts only)
+
+# --- GUI ---
+customtkinter
+tkinterdnd2
+
+# --- 3D / visualization ---
+pyvista
+pyvistaqt
+PySide6
+vtk
+
+# --- Mesh processing ---
+pymeshlab
+
+# --- Numerics, SOFA & plotting ---
+numpy
+scipy
+matplotlib
+sofar

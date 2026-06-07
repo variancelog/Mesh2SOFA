@@ -1,25 +1,31 @@
 # Mesh2SOFA Orchestrator
 
-An unofficial Python-based GUI orchestrator for [Mesh2HRTF](https://github.com/Mesh2HRTF/Mesh2HRTF) that streamlines the end-to-end workflow of generating personalized HRTFs. This tool automates the process from 3D mesh alignment to numerical simulation and final SOFA file export. It requires a 3d mesh of a head to start.
+An unofficial Python-based GUI orchestrator for [Mesh2HRTF](https://github.com/Mesh2HRTF/Mesh2HRTF) that streamlines the end-to-end workflow of generating personalized HRTFs. This tool automates the process from 3D mesh alignment to numerical simulation and final SOFA file export. It requires a 3d mesh of a head to start. 
 
 > **Note:** This is an unofficial orchestrator and is not directly affiliated with the Mesh2HRTF project.
 
+
+
 ## Features
 
-* **Workflow Management:** Guided 7-step process from raw mesh to final SOFA.
+* **Workflow Management:** Guided 6-step process from raw mesh to final SOFA.
 * **Visual Interface:** User-friendly GUI built with CustomTkinter.
-* **Blender Automation:** Automatically sets up scenes for mesh grading.
-* **Simulation Control:** Runs NumCalc simulations (supports both Standard and Low-Res/16kHz modes).
+* **Mesh Alignment:** GUI to easily align mesh to the Franfurt plane and fine tune rotation.
+* **Blender Automation:** Automatically sets up scenes for mesh grading and export.
+* **Simulation Control:** Launches NumCalc simulations including "Test Mode" to proecess only highest frequencies prior to full simulation.
+* **Visual Interface:** Generate both raw and diffuse-field equalized SOFA files in both 44.1 and 48kHz.
+* **DFHRTF:** Compute and export DFHRTF responses with optional tilt.
+* **VTK Viewer:** Export and view VTK files to observe sound pressure for each simulated frequency.
 * **Cross-Platform:** Designed to run on Windows, Mac, and Linux.
 
 ## Prerequisites
 
 To use this orchestrator, you must have the following installed:
 
-1.  **Python 3.10+** including required packages (outlined below)
+1.  **Python 3.10+** including required packages (outlined below and in requirements.txt)
 2.  **[Mesh2HRTF](https://sourceforge.net/projects/mesh2hrtf/)** including compiled NumCalc and Mesh Grading Tool executables.
-    - NOTE: Make sure to compile NumCalc from source - the Windows binaries on mesh2HRTF tools for Windows are outdated. 
-    - NumCalc binaries should be in the `NumCalc/bin` folder
+    - NOTE: Make sure to compile NumCalc from source - the Windows binaries on mesh2HRTF-tools for Windows are outdated. 
+    - NumCalc binaries should be in the `Mesh2HRTF/NumCalc/bin` folder
 3.  **[Blender](https://www.blender.org/)** (For use with Mesh2Input - 4.5 LTS recommended).
 4.  **Additional Python Libraries** outlined below.
 
@@ -32,8 +38,9 @@ To use this orchestrator, you must have the following installed:
 
 2.  Install required Python packages:
     ```bash
-    pip install customtkinter pyvista pymeshlab matplotlib vtk
+    pip install -r requirements.txt
     ```
+    > **Note:** `mesh2hrtf` (from your Mesh2HRTF installation) and Blender's `bpy` are additional dependencies not installed via pip — see Prerequisites above.
 
 3.  **Install/compile the mesh grading tool:**
     * **Windows:** You can install the compiled binaries from [mesh2hrtf-tools](https://sourceforge.net/p/mesh2hrtf-tools/code/ci/master/tree/hrtf_mesh_grading_WindowsExe/).
