@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.3.0 (2026-06-13)
+
+**1. UI Modernization & UX Improvements**
+- **Simplified Title & Branding:** Main window title shortened to "Mesh2SOFA".
+- **Clickable Project Path:** The project title label is now interactive; clicking it opens the project folder in your OS file explorer.
+- **Button Refactoring:** Replaced icon-only buttons with clearer text-based buttons ("Refresh", "Open"). The "New" button is now highlighted in green for better discoverability.
+- **Interactive Tooltips:** Added descriptive tooltips to all main workflow buttons to help new users understand each step.
+- **Dynamic Window Title:** The application window title now dynamically updates to show the full path of the currently loaded project.
+
+**2. Resolution Mode Integration**
+- **Direct Access:** Removed the separate "Project Settings" (⚙) dialog. Resolution mode selection (Standard vs. Lowres) is now integrated directly into the main UI via a segmented control.
+- **Automatic Sync:** The resolution mode state is automatically synced and saved with the project configuration.
+
+**3. Workflow & Stability**
+- **Auto-Save on Refresh:** Manual refreshes now trigger a silent save of the project configuration, ensuring state is never lost.
+- **Improved Logging:** Better feedback when opening project folders and refreshing status.
+
+**4. Documentation & Assets**
+- **Updated README:** Revised instructions to match the new UI layout and added the latest application screenshot.
+- **New IDEA.md:** Added a dedicated file for tracking future development ideas and feature requests.
+
 ## 2026-06-07 (latest)
 
 **1. Fully portable project paths**

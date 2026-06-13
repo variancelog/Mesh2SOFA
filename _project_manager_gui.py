@@ -31,51 +31,37 @@ COLOR_ERROR = "#C0392B"
 HOVER_ACTIVE = "#209F69"
 HOVER_DONE = "#36719F"
 
-class ProjectSettingsDialog(ctk.CTkToplevel):
-    def __init__(self, parent, current_res, callback):
-        super().__init__(parent)
-        self.callback = callback
-        self.title("Project Settings")
-        self.geometry("400x230")
+class Tooltip:
+    """Lightweight tooltip bound to any tkinter/CTk widget."""
+    def __init__(self, widget, text):
+        self._widget = widget
+        self._text = text
+        self._tip_win = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
 
-        self.lift()
-        self.attributes("-topmost", True)
-        self.focus()
-
-        self.lbl = ctk.CTkLabel(self, text="Project Configuration", font=("Roboto Medium", 16))
-        self.lbl.pack(pady=15)
-
-        self.frame = ctk.CTkFrame(self)
-        self.frame.pack(pady=10, padx=20, fill="x")
-
-        # Resolution Mode selection
-        self.lbl_res = ctk.CTkLabel(self.frame, text="Resolution Mode:", font=("Roboto", 12, "bold"))
-        self.lbl_res.grid(row=0, column=0, columnspan=2, padx=10, pady=(12, 4), sticky="w")
-
-        self.res_var = ctk.StringVar(value=current_res)
-
-        self.radio_standard = ctk.CTkRadioButton(
-            self.frame,
-            text="Standard Mode  —  Max 18 kHz (High RAM)",
-            variable=self.res_var,
-            value="standard"
+    def _show(self, event=None):
+        if self._tip_win or not self._text:
+            return
+        x = self._widget.winfo_rootx() + 20
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+        self._tip_win = tw = __import__("tkinter").Toplevel(self._widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        import tkinter as tk
+        lbl = tk.Label(
+            tw, text=self._text, justify="left",
+            background="#2b2b2b", foreground="#e0e0e0",
+            relief="solid", borderwidth=1,
+            font=("Roboto", 10), wraplength=280, padx=6, pady=4
         )
-        self.radio_standard.grid(row=1, column=0, columnspan=2, padx=20, pady=(4, 2), sticky="w")
+        lbl.pack()
 
-        self.radio_lowres = ctk.CTkRadioButton(
-            self.frame,
-            text="Lowres Mode  —  Max 16 kHz (Lower RAM)",
-            variable=self.res_var,
-            value="lowres"
-        )
-        self.radio_lowres.grid(row=2, column=0, columnspan=2, padx=20, pady=(2, 12), sticky="w")
+    def _hide(self, event=None):
+        if self._tip_win:
+            self._tip_win.destroy()
+            self._tip_win = None
 
-        self.btn_save = ctk.CTkButton(self, text="Apply Settings", fg_color="green", command=self.on_confirm)
-        self.btn_save.pack(pady=20)
-
-    def on_confirm(self):
-        self.callback(self.res_var.get())
-        self.destroy()
 
 class MoveCopyDialog(ctk.CTkToplevel):
     """Dialog to ask user whether to Move or Copy a file."""
@@ -319,7 +305,7 @@ class HRTFProjectManager(ctk.CTk):
         super().__init__()
 
         # Window Setup
-        self.title("Mesh2SOFA (Mesh2HRTF GUI)")
+        self.title("Mesh2SOFA")
         self.geometry("800x800")
         
         self.app_settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_settings.json")
@@ -364,25 +350,21 @@ class HRTFProjectManager(ctk.CTk):
         
         self.lbl_title = ctk.CTkLabel(self.frame_top, text="No Project Loaded", font=("Roboto Medium", 24))
         self.lbl_title.pack(side="left")
+        self.lbl_title.bind("<Button-1>", self.open_project_folder)
+        self.lbl_title.bind("<Enter>", lambda e: self.lbl_title.configure(cursor="hand2", text_color="#7ecfad"))
+        self.lbl_title.bind("<Leave>", lambda e: self.lbl_title.configure(cursor="", text_color="white"))
 
         self.frame_controls = ctk.CTkFrame(self.frame_top, fg_color="transparent")
         self.frame_controls.pack(side="right")
         
-        self.btn_load = ctk.CTkButton(self.frame_controls, text="Save", width=80, command=self.save_project_json)
-        self.btn_load.pack(side="right", padx=5)        
-
-        self.btn_refresh = ctk.CTkButton(self.frame_controls, text="↻", width=40, command=self.manual_refresh)
+        self.btn_refresh = ctk.CTkButton(self.frame_controls, text="Refresh", width=80, command=self.manual_refresh)
         self.btn_refresh.pack(side="right", padx=5)
-        
+
         self.btn_load = ctk.CTkButton(self.frame_controls, text="Open", width=80, fg_color="#444", command=self.load_project_json)
         self.btn_load.pack(side="right", padx=5)
 
         self.btn_new = ctk.CTkButton(self.frame_controls, text="New", width=80, fg_color="#28a745", hover_color="#218838", command=self.create_new_project)
         self.btn_new.pack(side="right", padx=5)
-
-        # SETTINGS BUTTON
-        self.btn_settings = ctk.CTkButton(self.frame_controls, text="⚙", width=40, fg_color="#555", command=self.open_settings)
-        self.btn_settings.pack(side="right", padx=5)
 
         # --- SECTION 1: PATHS & CONFIG ---
         self.tabview_config = ctk.CTkTabview(self, height=0)
@@ -404,8 +386,33 @@ class HRTFProjectManager(ctk.CTk):
         self.add_config_row(2, "Mesh Grading Tool Bin:", "entry_bins", os.getcwd(), browse_cmd=self.browse_bins, parent_frame=tab_app)
 
         # PROJECT TAB PATH BUTTONS
-        self.add_config_row(0, "Project Folder:", "entry_base", "Select project root...", browse_cmd=self.browse_base, parent_frame=tab_proj)
-        
+        # entry_base must exist for all base-path readers (.get()/.insert()), but the
+        # folder is no longer user-selectable — it is derived from project.json location.
+        self.entry_base = ctk.CTkEntry(tab_proj, placeholder_text="Select project root...")
+        # (intentionally not gridded — kept hidden as the base-path store)
+
+        # Resolution mode toggle (replaces the old Project Folder row)
+        _MODE_LABELS = {
+            "standard": "Standard (18 kHz Max)",
+            "lowres":   "Lowres (16 kHz Max)",
+        }
+        self._mode_label_to_value = {v: k for k, v in _MODE_LABELS.items()}
+        self._mode_value_to_label = _MODE_LABELS
+
+        lbl_mode = ctk.CTkLabel(tab_proj, text="Project Mode:")
+        lbl_mode.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+
+        self.seg_mode = ctk.CTkSegmentedButton(
+            tab_proj,
+            values=list(_MODE_LABELS.values()),
+            command=self.on_mode_changed,
+        )
+        self.seg_mode.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
+        self.seg_mode.set(_MODE_LABELS["standard"])  # default; updated in update_ui_from_data
+
+        # Tooltips are attached after the widget is rendered so _buttons_dict is populated.
+        self.after(100, self._attach_mode_tooltips)
+
         lbl_grid = ctk.CTkLabel(tab_proj, text="Evaluation Grid(s):")
         lbl_grid.grid(row=1, column=0, padx=10, pady=5, sticky="w")
         self.entry_grid = ctk.CTkEntry(tab_proj, placeholder_text="Set Mesh2HRTF Path first...", state="disabled")
@@ -423,16 +430,16 @@ class HRTFProjectManager(ctk.CTk):
         self.lbl_workflow.grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
         # WORKFLOW BUTTONS
-        self.btn_align = ctk.CTkButton(self.frame_actions, text="1. Align Head", command=self.run_alignment)
+        self.btn_align = ctk.CTkButton(self.frame_actions, text="1. Align Mesh", command=self.run_alignment)
         self.btn_align.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
         
-        self.btn_process = ctk.CTkButton(self.frame_actions, text="2. Process & Grade", command=self.run_processing)
+        self.btn_process = ctk.CTkButton(self.frame_actions, text="2. Process & Grade Mesh", command=self.run_processing)
         self.btn_process.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
         
-        self.btn_blender = ctk.CTkButton(self.frame_actions, text="3. Open in Blender (Setup Scene)", command=self.run_blender_setup)
+        self.btn_blender = ctk.CTkButton(self.frame_actions, text="3. Open Graded Meshes in Blender (Setup Scene)", command=self.run_blender_setup)
         self.btn_blender.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
-        self.btn_export = ctk.CTkButton(self.frame_actions, text="4. Export Project (Manual/Script)", state="disabled", fg_color="gray30", text_color="gray")
+        self.btn_export = ctk.CTkButton(self.frame_actions, text="4. Export Project Folders (Manual/Script)", state="disabled", fg_color="gray30", text_color="gray")
         self.btn_export.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
         self.btn_numcalc = ctk.CTkButton(self.frame_actions, text="5. Run NumCalc Simulation", command=self.run_numcalc)
@@ -589,14 +596,51 @@ class HRTFProjectManager(ctk.CTk):
         self.textbox.configure(state="disabled")
 
     # --- SETTINGS HANDLERS ---
-    def open_settings(self):
-        current = self.project_data.get("project_resolution", "standard")
-        ProjectSettingsDialog(self, current, self.update_settings).grab_set()
-
     def update_settings(self, new_res):
         self.project_data["project_resolution"] = new_res
         self.log(f"Project Resolution set to: {new_res.upper()}")
         self.save_project_json(silent=True)
+
+    def on_mode_changed(self, label):
+        """Called when the user clicks a segment on the Project Mode toggle."""
+        value = self._mode_label_to_value.get(label, "standard")
+        self.update_settings(value)
+
+    def _attach_mode_tooltips(self):
+        """Bind tooltips to each internal segment button after they are rendered."""
+        _tips = {
+            "Standard (18 kHz Max)": (
+                "Standard mode: outputs up to 18 kHz.\n"
+                "Higher mesh resolution — requires more RAM and longer NumCalc simulation time."
+            ),
+            "Lowres (16 kHz Max)": (
+                "Lowres mode: outputs up to 16 kHz.\n"
+                "Lower mesh resolution — uses less RAM and runs faster."
+            ),
+        }
+        try:
+            for label, tip_text in _tips.items():
+                btn = self.seg_mode._buttons_dict.get(label)
+                if btn:
+                    Tooltip(btn, tip_text)
+        except Exception:
+            pass  # Gracefully ignore if internal CTk API changes
+
+    def open_project_folder(self, event=None):
+        """Open the current project folder in the OS file browser (cross-platform)."""
+        path = self.entry_base.get()
+        if not path or not os.path.isdir(path):
+            self.log("[!] No project folder loaded.")
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            self.log(f"[!] Could not open folder: {e}")
 
     # --- PROJECT CREATION & PATHS ---
     def create_new_project(self):
@@ -870,6 +914,9 @@ class HRTFProjectManager(ctk.CTk):
         self.entry_grid.delete(0, "end")
         if d.get("eval_grid"): self.entry_grid.insert(0, d.get("eval_grid"))
         self.entry_grid.configure(state="disabled")
+        # Sync resolution toggle
+        res = d.get("project_resolution", "standard")
+        self.seg_mode.set(self._mode_value_to_label.get(res, "Standard (18 kHz Max)"))
         self.update_workflow_state()
 
     def load_project_json(self):
@@ -920,8 +967,9 @@ class HRTFProjectManager(ctk.CTk):
             if not silent: self.log(f"Error saving: {e}")
 
     def manual_refresh(self):
+        self.save_project_json(silent=True)
         self.update_workflow_state()
-        self.log("Status refreshed.")
+        self.log("Refreshed & saved.")
 
     def update_workflow_state(self):
         base_path = self.entry_base.get()
@@ -929,8 +977,10 @@ class HRTFProjectManager(ctk.CTk):
         
         if base_path and os.path.isdir(base_path):
             self.lbl_title.configure(text=proj_name)
+            self.title(f"Mesh2SOFA ({base_path})")
         else:
             self.lbl_title.configure(text="No Project Loaded")
+            self.title("Mesh2SOFA")
 
         mesh_path = self.get_mesh_dir()
         

@@ -4,7 +4,7 @@ An unofficial Python-based GUI orchestrator for [Mesh2HRTF](https://github.com/M
 
 > **Note:** This is an unofficial orchestrator and is not directly affiliated with the Mesh2HRTF project.
 
-
+![Mesh2SOFA Screenshot](screenshot_mesh2sofa.png)
 
 ## Features
 
@@ -64,8 +64,8 @@ To use this orchestrator, you must have the following installed:
 
 2.  **Configuration:**
     * Create a New Project or Open an existing Project.
-    * If your computer has limited RAM (e.g. 8-16GB), select the "low-res" option from the settings (⚙) menu. This will use a slightly lower res graded mesh for the simulation, and will calculate the HRTF only up to 16 kHz to save on RAM. However, it will still produce the same 44.1 and 48 kHz SOFA files in the "Generate Mastered SOFA Files" step through upsampling.
-      * NOTE: Limited RAM users should use a shoulderless/torsoless mesh to greatly reduce RAM usage on simulations.  
+    * If your computer has limited RAM (e.g. 8-16GB), select the "low-res" option from the Project Settings. This will use a slightly lower res graded mesh for the simulation, and will calculate the HRTF only up to 16 kHz to save on RAM. However, it will still produce the same 44.1 and 48 kHz SOFA files in the "Generate Mastered SOFA Files" step through upsampling.
+      * NOTE: Limited RAM are encouraged to use a shoulderless/torsoless mesh to greatly reduce RAM usage on simulations.  
     * Configure your **Project Folder** location (where your project files will be stored), Mesh2HRTF root folder (e.g. C:/Mesh2HRTF), select an **Evaluation Grid** (recommended to stick with "Default"), **Blender Exe** (so Mesh2SOFA knows where Blender is on your computer in Step 3), and the **Mesh Grading Tool** binaries (e.g. mesh-hrtf-tools/hrtf_mesh_grading_WindowsExe/bin on Windows).
 
 3.  **Workflow:**
@@ -76,10 +76,9 @@ To use this orchestrator, you must have the following installed:
     * **3. Open in Blender** opens a reference Blender file that contains the meshes and materials needed for generating the project folders used by NumCalc.
     * **4. Setup and Export in Blender** is where you use the Mesh2SOFA panel in Blender to assign materials and export the project files (details below). 
     * **5: Run NumCalc Simulation** Runs multiple instances of NumCalc against your project folders. This step is VERY compute and memory instensive. On a normal home computer, this can take anywhere from 8 to 24 hours. It is recommended to run this on as powerful a computer as possible. You can stop the simulation with the "STOP PROCESS" button; it will stop the processes but not delete the simulation output, so you can pick up where you left off.
-    * **6. Generate Mastered SOFA Files** Generates multiple versions of the SOFA files that can be used with binaural rendering plugins such as SPARTA Binauraliser and APL Viruoso. Four versions are generated: diffuse-field equalized and non-diffused field equalized, both in 44.1 kHz and 48 kHz samplerates. Either version can be used with SPARTA (it has a built in optional "Apply Diffuse-Field EQ" setting), but Virtuoso expects a SOFA file that is already diffuse-field equalized.
-      * *Note on sample length:* The standard HRIR output length is 256 samples. If you are importing external measured SOFA files with an unusually long impulse response, you can enable the **"512 sample (edge case use only)"** option to double the processing and output lengths.
+    * **6. Generate Mastered SOFA Files** Generates multiple versions of the SOFA files that can be used with binaural rendering plugins such as SPARTA Binauraliser and APL Viruoso. Four versions are generated: diffuse-field equalized and non-diffused field equalized, both in 44.1 kHz and 48 kHz samplerates. Either version can be used with SPARTA (it has a built in optional "Apply Diffuse-Field EQ" setting), but Virtuoso and some other binaural renderers expect an already diffuse field equalized SOFA.
     * **EXTRAS:**
-      * **Generate DFHRTF Files** generates separate tilted diffuse-field responses as CSV files for left, right, and average. Frequency response plots are also generated. This step allows you to specify a tilt value (e.g. -.8db per octave), and you can run it multiple times to produce and test different outputs. (The way to use these files is to take blocked-ear canal measurements of your headphones, and equalize or convolve them to the tilted diffuse-field response.)
+      * **Generate DFHRTF Files** generates separate tilted diffuse-field responses as CSV files for left, right, and average. Frequency response plots are also generated. This step allows you to specify a tilt value (e.g. -1.0db per octave), and you can run it multiple times to produce and test different outputs. (The way to use these files is to take blocked-ear canal measurements of your headphones, and equalize or convolve them to the tilted diffuse-field response.)
       * **Generate Paraview VTK Files** exports pressure data from your simulation into the VTK format for specific frequency ranges. You can then use the included `_vtk_viewer.py` tool (or ParaView) to interactively visualize the acoustic pressure fields around your head model.
 
 ## Blender Steps
