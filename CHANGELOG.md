@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.4.0 (2026-06-17) — Mesh Inspection & Tunnel-Loop Detection
+
+A new pre-simulation **mesh inspection stage** that detects topological tunnels
+(genus > 0 scanning artifacts — the "pierced-ear" see-through holes) and helps
+the user remove them before BEM. BEM/NumCalc needs a watertight, genus-0 surface.
+
+**1. Mesh inspector (`mesh_inspector.py`)**
+- Reports boundary/non-manifold edges, components, self-intersections, and
+  **genus** for a mesh. Output is ASCII-only (`[X]`/`[!]`/`[OK]`) so it never
+  crashes the Windows cp1252 console or corrupts the GUI subprocess pipe.
+
+**2. Tunnel cut-loop detection (`tunnel_loop_extractor.py`, `tunnel_loop_locator.py`)**
+- Tree-cotree homology finds each handle; loops are **tightened** to the short
+  neck ring and **verified** by cut-and-Euler-check (a loop is only accepted if
+  deleting its band drops genus by one, opens exactly two holes, keeps one
+  component). No HanTun/C++ dependency.
+- `dual_crossing_loop` generates the **second** of the two dual cut loops (the
+  shortest loop crossing the first at one vertex), so both candidate loops for a
+  handle are available. Validated vertex-identical to a manual ground-truth cut.
+- Exports the chosen cut loop's vertex indices + world coordinates next to the
+  mesh, with a coordinate-based Blender selection snippet (import-order robust).
+
+**3. Interactive problem viewer (`mesh_problem_viewer.py`)**
+- Native PyVista window showing all detected problems; for tunnels it draws
+  **both** candidate cut loops (green "Cut here" / red "Avoid") with leader-line
+  labels, and lets the user **click a ring (or its label) to choose which loop
+  to cut** — re-exporting on each change. The camera opens facing the detected
+  issue, and the base mesh recomputes outward normals so meshes that render
+  black elsewhere still shade correctly.
+- NOTE: which loop to cut is **not** auto-decided — no reliable local geometric
+  classifier exists (the correct choice depends on which side is the scan
+  artifact, a global judgment), so selection is manual by design.
+
+**4. Pipeline integration (`_project_manager_gui.py`, `align_head.py`, `process_and_grade.py`)**
+- After grading, the GUI inspects the mesh and shows a **MeshQualityDialog** when
+  criticals are found. When the only criticals are tunnels (which cannot be
+  auto-repaired), the Repair button is suppressed with guidance to fix by
+  sculpting in Blender, then re-align.
+
+**5. Dependencies** — added `networkx` (tree-cotree homology). `requirements.txt`
+updated; `memory/` and `research/` are now gitignored (working notes/papers).
+
 ## v1.3.0 (2026-06-13)
 
 **1. UI Modernization & UX Improvements**

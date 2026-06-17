@@ -37,9 +37,8 @@ def run_processing(aligned_mesh_path, grading_bin_path):
     with open(info_path, 'r') as f:
         data = json.load(f)
         
-    L = data["left_ear"]
-    R = data["right_ear"]
-    
+    ear_width = data.get("ear_width") or abs(data["left_ear"][1] - data["right_ear"][1])
+
     # 2. Determine Resolution Settings
     project_json_path = find_project_json(os.path.dirname(aligned_mesh_path))
     resolution = "standard"
@@ -73,8 +72,7 @@ def run_processing(aligned_mesh_path, grading_bin_path):
         bbox = ms.current_mesh().bounding_box()
         diag = bbox.diagonal()
         
-        width = abs(L[1] - R[1])
-        if width > 5.0: # Millimeters
+        if ear_width > 5.0: # Millimeters
             target_mm = target_mm_base 
             log(f"      (Units: mm | Diag: {diag:.2f} | Target: {target_mm}mm)")
         else: # Meters
@@ -115,6 +113,38 @@ def run_processing(aligned_mesh_path, grading_bin_path):
     except Exception as e:
         log(f"[ERROR] Grading binary failed: {e}")
         sys.exit(1)
+
+    # Step C: Mesh Quality Inspection of graded outputs
+    log("   -> Step C: Inspecting Graded Meshes...")
+    try:
+        import mesh_inspector
+        mesh_check = {}
+        any_critical = False
+        for side, path in [("Left", out_L), ("Right", out_R)]:
+            if not os.path.exists(path):
+                log(f"   [!] {side}_Graded.ply not found, skipping check.")
+                continue
+            report = mesh_inspector.inspect_mesh(path)
+            log(mesh_inspector.format_report(report))
+            log(f"[MESH_CHECK] side={side} severity={report['severity']}")
+            mesh_check[side.lower()] = {
+                "severity": report["severity"],
+                "counts": report["counts"],
+            }
+            if report["severity"] == "critical":
+                any_critical = True
+
+        check_path = os.path.join(project_dir, "mesh_check.json")
+        with open(check_path, "w") as f:
+            json.dump(mesh_check, f, indent=4)
+
+        if any_critical:
+            log("[MESH_CHECK] One or more graded meshes have critical issues. Step 3 is blocked.")
+            sys.exit(1)
+        else:
+            log("[MESH_CHECK] Graded meshes passed quality check.")
+    except ImportError:
+        log("   [!] mesh_inspector.py not found — quality check skipped.")
 
     log("--- Processing Complete ---")
 

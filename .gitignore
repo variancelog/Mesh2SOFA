@@ -23,6 +23,8 @@ sofa_*/
 plan*/
 *output*/
 projects/
+memory/
+research/
 
 # --- 3D Intermediate Files ---
 # Ignore generated blend files, but keep your 3d_Reference.blend template

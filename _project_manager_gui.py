@@ -300,6 +300,42 @@ class GridSelectionDialog(ctk.CTkToplevel):
         self.callback(",".join(selected))
         self.destroy()
 
+class MeshQualityDialog(ctk.CTkToplevel):
+    """Dialog shown when graded meshes have critical quality issues after Step 2."""
+    def __init__(self, parent, mesh_path, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.mesh_path = mesh_path
+        self.title("Mesh Quality Issues — Step 3 Blocked")
+        self.geometry("500x210")
+        self.resizable(False, False)
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus()
+        self.grab_set()
+
+        lbl = ctk.CTkLabel(self,
+            text="One or more graded meshes have critical quality issues.\n"
+                 "Step 3 (Blender) is blocked until they are resolved.\n\n"
+                 "Repair automatically, or open the problem viewer to inspect.",
+            font=("Roboto", 13))
+        lbl.pack(pady=20, padx=20)
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=10, fill="x")
+
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="transparent", border_width=1,
+                      text_color=("gray10", "#DCE4EE"), command=self.on_cancel).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Visualize Problems", fg_color="#C0392B",
+                      hover_color="#A93226", command=self.on_visualize).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Attempt Repair", fg_color="#2CC985",
+                      hover_color="#209F69", command=self.on_repair).pack(side="right", padx=10)
+
+    def on_repair(self):    self.callback("repair", self.mesh_path);    self.destroy()
+    def on_visualize(self): self.callback("visualize", self.mesh_path); self.destroy()
+    def on_cancel(self):    self.destroy()
+
+
 class HRTFProjectManager(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -430,7 +466,7 @@ class HRTFProjectManager(ctk.CTk):
         self.lbl_workflow.grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
         # WORKFLOW BUTTONS
-        self.btn_align = ctk.CTkButton(self.frame_actions, text="1. Align Mesh", command=self.run_alignment)
+        self.btn_align = ctk.CTkButton(self.frame_actions, text="1. Align & Inspect", command=self.run_alignment)
         self.btn_align.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
         
         self.btn_process = ctk.CTkButton(self.frame_actions, text="2. Process & Grade Mesh", command=self.run_processing)
@@ -566,6 +602,9 @@ class HRTFProjectManager(ctk.CTk):
                 if msg == "DONE":
                     self.manual_refresh()
                     self.btn_stop.configure(state="disabled")
+                    if getattr(self, '_pending_mesh_check', False):
+                        self._pending_mesh_check = False
+                        self.after(200, self._check_mesh_quality_result)
                 else:
                     self.log(msg, timestamp=False)
         except queue.Empty:
@@ -971,6 +1010,60 @@ class HRTFProjectManager(ctk.CTk):
         self.update_workflow_state()
         self.log("Refreshed & saved.")
 
+    # --- MESH QUALITY HELPERS ---
+
+    def _mesh_check_passed(self, mesh_path):
+        """Return True if mesh_check.json is absent (backward compat) or has no critical severity."""
+        p = os.path.join(mesh_path, "mesh_check.json")
+        if not os.path.exists(p):
+            return True
+        try:
+            with open(p) as f:
+                data = json.load(f)
+            return not any(v.get("severity") == "critical" for v in data.values())
+        except Exception:
+            return True
+
+    def _check_mesh_quality_result(self):
+        """Called after a process_and_grade run — shows MeshQualityDialog if criticals found."""
+        mesh_path = self.get_mesh_dir()
+        check_path = os.path.join(mesh_path, "mesh_check.json")
+        if not os.path.exists(check_path):
+            return
+        try:
+            with open(check_path) as f:
+                data = json.load(f)
+        except Exception:
+            return
+        has_critical = any(v.get("severity") == "critical" for v in data.values())
+        if has_critical:
+            MeshQualityDialog(self, mesh_path, self._on_mesh_quality_action)
+
+    def _on_mesh_quality_action(self, action, mesh_path):
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+
+        if action == "repair":
+            self.log("--> Attempting mesh repair on graded files...")
+            self._pending_mesh_check = True
+            cmd = [sys.executable, "-u", inspector, "repair_graded", mesh_path]
+            self.run_external_command(cmd)
+
+        elif action == "visualize":
+            viewer = os.path.join(scripts_dir, "mesh_problem_viewer.py")
+            check_path = os.path.join(mesh_path, "mesh_check.json")
+            try:
+                with open(check_path) as f:
+                    data = json.load(f)
+                for side, side_data in data.items():
+                    if side_data.get("severity") == "critical":
+                        ply = os.path.join(mesh_path, f"{side.capitalize()}_Graded.ply")
+                        if os.path.exists(ply):
+                            subprocess.Popen([sys.executable, viewer, ply],
+                                             creationflags=CREATE_NO_WINDOW)
+            except Exception as e:
+                self.log(f"[!] Could not launch viewer: {e}")
+
     def update_workflow_state(self):
         base_path = self.entry_base.get()
         proj_name = self.get_project_name()
@@ -985,7 +1078,9 @@ class HRTFProjectManager(ctk.CTk):
         mesh_path = self.get_mesh_dir()
         
         step1_done = os.path.exists(os.path.join(mesh_path, "aligned_head.ply"))
-        step2_done = step1_done and os.path.exists(os.path.join(mesh_path, "Left_Graded.ply"))
+        step2_done = (step1_done
+                      and os.path.exists(os.path.join(mesh_path, "Left_Graded.ply"))
+                      and self._mesh_check_passed(mesh_path))
         
         blend_file = os.path.join(base_path, f"{proj_name}.blend")
         step3_done = step2_done and os.path.exists(blend_file)
@@ -1065,6 +1160,7 @@ class HRTFProjectManager(ctk.CTk):
         if not os.path.exists(grading_exe): return self.log(f"Error: Grading binary missing at {grading_exe}")
         
         self.log("--> Starting Processing & Grading...")
+        self._pending_mesh_check = True
         cmd = [sys.executable, "-u", script_path, aligned_mesh, grading_exe]
         self.run_external_command(cmd)
 

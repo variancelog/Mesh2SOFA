@@ -17,6 +17,7 @@ vtk
 
 # --- Mesh processing ---
 pymeshlab
+networkx        # tree-cotree homology for tunnel/handle (genus) loop detection
 
 # --- Numerics, SOFA & plotting ---
 numpy
