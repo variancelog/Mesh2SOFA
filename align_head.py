@@ -1,6 +1,7 @@
 import sys
 import os
 import subprocess
+from project_store import ProjectStore, MESH_ALIGNED
 
 # Force PySide6 backend for pyvistaqt
 os.environ["QT_API"] = "pyside6"
@@ -333,6 +334,13 @@ class AlignHeadApp(QtWidgets.QMainWindow):
         try:
             self.mesh.save(self.output_mesh_path)
 
+            # Invalidate any prior aligned-check so re-aligning forces re-inspection.
+            # The check is keyed to the mesh directory, not the filename, so a
+            # prior "ok" would otherwise survive an in-place overwrite of aligned_head.ply.
+            ProjectStore.for_mesh_dir(
+                os.path.dirname(self.output_mesh_path)
+            ).clear_check(MESH_ALIGNED)
+
             # Save Info JSON — include raw picked points so they can be reloaded
             info_path = self._info_path()
             alignment_data = {
@@ -343,7 +351,13 @@ class AlignHeadApp(QtWidgets.QMainWindow):
             with open(info_path, 'w') as f:
                 json.dump(alignment_data, f, indent=4)
 
-            self._inspect_and_confirm(self.output_mesh_path)
+            # Alignment is now its own step. Mesh inspection / repair / tunnel
+            # fixing lives in the separate "Inspect & Fix Mesh" step in the GUI
+            # (run on this aligned mesh), so we just confirm the save here.
+            QtWidgets.QMessageBox.information(self, "Success",
+                f"Mesh aligned and saved.\n\nNext: run 'Inspect & Fix Mesh' in the "
+                f"project manager to check quality.\n\n{self.output_mesh_path}")
+            self.close()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save mesh: {e}")
 

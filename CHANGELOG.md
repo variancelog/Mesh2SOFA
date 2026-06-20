@@ -1,5 +1,68 @@
 # Changelog
 
+## v1.4.1 (2026-06-19) — Pipeline Integration, Qt Viewer & ProjectStore
+
+Completes the v1.4.0 mesh inspection & tunnel-loop work: the viewer is a proper
+Qt+QThread app, tunnel cutting works in-app with one keypress, and the GUI now
+tracks inspection state reliably across re-align and viewer-exit events.
+
+**1. ProjectStore (`project_store.py` — new module)**
+- Central owner of all project.json and check-file I/O (`aligned_check.json`,
+  `mesh_check.json`). `CleanState` enum (CLEAN / CRITICAL / NOT_RUN) with
+  consistent absent/corrupt → NOT_RUN semantics.
+- `clear_check(mesh)` — new idempotent delete; called by `align_head.py` after
+  every save so a re-aligned mesh always reverts to NOT_RUN (prior "ok" no
+  longer survives an in-place overwrite of `aligned_head.ply`).
+- All worker scripts (`process_and_grade.py`, `run_numcalc_test.py`,
+  `mesh_inspector.py`) ported from hand-rolled JSON to ProjectStore.
+
+**2. GUI: Inspect & Fix step (`_project_manager_gui.py`)**
+- New **Step 2 "Inspect & Fix Mesh"** button; `AlignedMeshDialog` shows issues,
+  offers pymeshfix repair or tunnel-viewer launch. Inspect is OPTIONAL — warns
+  but does not block grading.
+- `_watch_viewer(proc, on_close)` — polls the detached viewer process and calls
+  `_check_aligned_quality_result` (or `_check_mesh_quality_result`) on close.
+  Inspect button restyles to "done" automatically after a successful in-app cut
+  & cap with no manual refresh needed.
+- Align renamed to "1. Align Mesh"; step labels renumbered 1–7.
+
+**3. Tunnel viewer rewrite (`mesh_problem_viewer.py`)**
+- Qt+QThread window: appears immediately with base mesh + fast overlays; cut-loop
+  computation runs in a background QThread with a progress bar overlay.
+- `TunnelSelector.apply_cut_and_cap()` — one-click "Apply Cut & Cap  [C]":
+  runs `cut_and_cap_loops`, saves over `aligned_head.ply`, refreshes
+  `aligned_check.json`. Falls back to exported loops (manual Blender) on failure;
+  original file is never left in a bad state.
+- `compute_tunnel_data` / `render_tunnel_data` split the old monolithic
+  `add_tunnel_overlay` so the background worker stays VTK-free.
+
+**4. In-app cut & cap (`tunnel_loop_extractor.py`)**
+- `cut_and_cap(pts, faces, loop_verts)` — deletes the 1-ring band, caps holes
+  with PyMeshLab `meshing_close_holes`, verifies genus drops by exactly one,
+  applies Taubin smoothing on the cap boundary.
+- `cut_and_cap_loops(pts, faces, loops)` — batched variant for multi-handle
+  meshes; all bands deleted before any re-indexing.
+- `_topo_counts(faces)` — vectorized numpy/scipy topology, replacing NetworkX
+  graph rebuilds (~3-4x faster; torture mesh 2: ~51 s -> ~16 s).
+- `dual_crossing_loop` ported from NetworkX to scipy `dijkstra` (batch across
+  all fan-side sources at once).
+
+**5. Mesh inspector improvements (`mesh_inspector.py`)**
+- pymeshfix is now the **primary repair engine**. Legacy PyMeshLab chain is the
+  fallback if pymeshfix is unavailable.
+- `inspect_aligned` / `repair_aligned` CLI subcommands write `aligned_check.json`.
+- `boundary_edges` added to counts; non-manifold counts now come from
+  `get_topological_measures()` (the old `select_non_manifold_*` filters do not
+  exist in current PyMeshLab and produced bogus -1 counts).
+- Genus suppressed on non-watertight meshes to avoid false alarms.
+
+**6. Progress callbacks (`tunnel_loop_locator.py`)**
+- `locate_cut_loops` and `select_cut_loop` accept an optional `progress_cb`
+  forwarded through the QThread worker to the viewer's status bar.
+
+**7. Dependencies**
+- `pymeshfix` added to `requirements.txt` (primary repair engine).
+
 ## v1.4.0 (2026-06-17) — Mesh Inspection & Tunnel-Loop Detection
 
 A new pre-simulation **mesh inspection stage** that detects topological tunnels

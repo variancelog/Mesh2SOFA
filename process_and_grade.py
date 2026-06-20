@@ -5,6 +5,8 @@ import argparse
 import subprocess
 import sys
 
+from project_store import ProjectStore, MESH_GRADED
+
 def log(msg):
     print(msg, flush=True)
 
@@ -13,16 +15,6 @@ def get_percentage_class():
         return pymeshlab.PercentageValue
     elif hasattr(pymeshlab, 'Percentage'):
         return pymeshlab.Percentage
-    return None
-
-def find_project_json(start_path):
-    """Searches up the directory tree for project.json"""
-    curr = start_path
-    for _ in range(3): # Check up to 3 levels up
-        candidate = os.path.join(curr, "project.json")
-        if os.path.exists(candidate):
-            return candidate
-        curr = os.path.dirname(curr)
     return None
 
 def run_processing(aligned_mesh_path, grading_bin_path):
@@ -40,12 +32,8 @@ def run_processing(aligned_mesh_path, grading_bin_path):
     ear_width = data.get("ear_width") or abs(data["left_ear"][1] - data["right_ear"][1])
 
     # 2. Determine Resolution Settings
-    project_json_path = find_project_json(os.path.dirname(aligned_mesh_path))
-    resolution = "standard"
-    if project_json_path:
-        with open(project_json_path, 'r') as f:
-            pj = json.load(f)
-            resolution = pj.get("project_resolution", "standard")
+    store = ProjectStore.locate(os.path.dirname(aligned_mesh_path))
+    resolution = store.resolution() if store else "standard"
     
     if resolution == "lowres":
         log("   [MODE] Lowres (Max 16kHz) selected.")
@@ -127,19 +115,14 @@ def run_processing(aligned_mesh_path, grading_bin_path):
             report = mesh_inspector.inspect_mesh(path)
             log(mesh_inspector.format_report(report))
             log(f"[MESH_CHECK] side={side} severity={report['severity']}")
-            mesh_check[side.lower()] = {
-                "severity": report["severity"],
-                "counts": report["counts"],
-            }
+            mesh_check[side.lower()] = (report["severity"], report["counts"])
             if report["severity"] == "critical":
                 any_critical = True
 
-        check_path = os.path.join(project_dir, "mesh_check.json")
-        with open(check_path, "w") as f:
-            json.dump(mesh_check, f, indent=4)
+        ProjectStore.for_mesh_dir(project_dir).write_check(MESH_GRADED, mesh_check)
 
         if any_critical:
-            log("[MESH_CHECK] One or more graded meshes have critical issues. Step 3 is blocked.")
+            log("[MESH_CHECK] One or more graded meshes have critical issues. The Blender step is blocked.")
             sys.exit(1)
         else:
             log("[MESH_CHECK] Graded meshes passed quality check.")

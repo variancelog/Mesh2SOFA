@@ -1,33 +1,27 @@
 import os
 import sys
 import subprocess
-import json
+
+from project_store import ProjectStore
 
 CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
 def run_test(project_dir, numcalc_exe):
     print(f"\n--- Testing Project: {os.path.basename(project_dir)} ---")
-    
+
     # 1. Determine Test Index based on Resolution
-    # Look for project.json in the project root (parent of 'Exports')
-    # project_dir is typically ".../Exports/Left_Project"
-    base_dir = os.path.dirname(os.path.dirname(project_dir))
-    project_json = os.path.join(base_dir, "project.json")
-    
-    test_idx = "120" # Default Standard (18kHz)
-    
-    if os.path.exists(project_json):
-        try:
-            with open(project_json, 'r') as f:
-                data = json.load(f)
-                if data.get("project_resolution") == "lowres":
-                    test_idx = "107" # Lowres (16.05kHz)
-                    print("   [Mode] Lowres Detected (Target Index: 107)")
-                else:
-                    print("   [Mode] Standard Detected (Target Index: 120)")
-        except:
-            print("   [!] Could not read project.json, defaulting to Standard.")
-    
+    # project_dir is typically ".../Exports/Left_Project"; the <=3-level walk
+    # reaches the project root that holds project.json.
+    store = ProjectStore.locate(project_dir)
+    resolution = store.resolution() if store else "standard"
+
+    if resolution == "lowres":
+        test_idx = "107" # Lowres (16.05kHz)
+        print("   [Mode] Lowres Detected (Target Index: 107)")
+    else:
+        test_idx = "120" # Default Standard (18kHz)
+        print("   [Mode] Standard Detected (Target Index: 120)")
+
     # 2. Target Directory
     source_dir = os.path.join(project_dir, "NumCalc", "source_1")
     if not os.path.exists(source_dir):

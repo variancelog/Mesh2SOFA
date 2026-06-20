@@ -3,6 +3,8 @@ import json
 import os
 import sys
 
+from project_store import ProjectStore, MESH_ALIGNED, MESH_GRADED
+
 
 def _get_si_filter_name(ms):
     """Try newer PyMeshLab self-intersection filter name, fall back to older API."""
@@ -26,6 +28,7 @@ def inspect_mesh(path, *, max_freq_hz=None):
 
     counts = {
         "holes": 0,
+        "boundary_edges": 0,
         "components": 0,
         "non_manifold_edges": 0,
         "non_manifold_verts": 0,
@@ -44,6 +47,7 @@ def inspect_mesh(path, *, max_freq_hz=None):
     try:
         topo = ms.get_topological_measures()
         counts["holes"] = int(topo.get("number_of_holes", 0))
+        counts["boundary_edges"] = int(topo.get("boundary_edges", 0))
         counts["components"] = int(topo.get("number_of_connected_components", 0))
         counts["unreferenced_verts"] = int(topo.get("number_unreferenced_vertices", 0))
         is_two_manifold = bool(topo.get("is_mesh_two_manifold", True))
@@ -59,19 +63,11 @@ def inspect_mesh(path, *, max_freq_hz=None):
         if genus_val is not None:
             counts["genus"] = int(genus_val)
 
-        if not is_two_manifold:
-            # Try to get per-element counts for a more informative report
-            try:
-                ms.apply_filter('select_non_manifold_edges')
-                counts["non_manifold_edges"] = int(ms.current_mesh().selected_edge_number())
-            except Exception:
-                counts["non_manifold_edges"] = -1  # unknown count but present
-
-            try:
-                ms.apply_filter('select_non_manifold_vertices')
-                counts["non_manifold_verts"] = int(ms.current_mesh().selected_vertex_number())
-            except Exception:
-                counts["non_manifold_verts"] = -1
+        # Per-element non-manifold counts are already provided by the topological
+        # measures dict (the old select_non_manifold_* filters don't exist in
+        # current PyMeshLab and threw, leaving a useless -1 "unknown count").
+        counts["non_manifold_edges"] = int(topo.get("non_two_manifold_edges", 0))
+        counts["non_manifold_verts"] = int(topo.get("non_two_manifold_vertices", 0))
     except Exception as e:
         pass
 
@@ -140,14 +136,14 @@ def inspect_mesh(path, *, max_freq_hz=None):
 
     if counts["holes"] > 0:
         critical.append({"issue": f"{counts['holes']} holes (open boundary / non-watertight)", "count": counts["holes"]})
-    if counts["non_manifold_edges"] != 0:
-        n = counts["non_manifold_edges"]
-        label = "unknown count of" if n == -1 else str(n)
-        critical.append({"issue": f"{label} non-manifold edge(s)", "count": n})
-    if counts["non_manifold_verts"] != 0:
-        n = counts["non_manifold_verts"]
-        label = "unknown count of" if n == -1 else str(n)
-        critical.append({"issue": f"{label} non-manifold vertex/vertices", "count": n})
+    elif counts["boundary_edges"] > 0:
+        # Some PyMeshLab builds don't report number_of_holes; boundary_edges still
+        # flags an open (non-watertight) surface, e.g. a crack or partial hole.
+        critical.append({"issue": f"{counts['boundary_edges']} boundary edge(s) (open surface / non-watertight)", "count": counts["boundary_edges"]})
+    if counts["non_manifold_edges"] > 0:
+        critical.append({"issue": f"{counts['non_manifold_edges']} non-manifold edge(s)", "count": counts["non_manifold_edges"]})
+    if counts["non_manifold_verts"] > 0:
+        critical.append({"issue": f"{counts['non_manifold_verts']} non-manifold vertex/vertices", "count": counts["non_manifold_verts"]})
     if counts["components"] > 1:
         critical.append({"issue": f"{counts['components']} disconnected components", "count": counts["components"]})
     if counts["si_faces"] > 0:
@@ -158,7 +154,7 @@ def inspect_mesh(path, *, max_freq_hz=None):
     # On a mesh with boundary edges the genus value is dominated by open edges, not real
     # handles, so we suppress it to avoid false alarms (those meshes are already flagged
     # critical for holes/non-manifold above).
-    if counts["genus"] > 0 and counts["holes"] == 0 and is_two_manifold:
+    if counts["genus"] > 0 and counts["holes"] == 0 and counts["boundary_edges"] == 0 and is_two_manifold:
         critical.append({
             "issue": (
                 f"{counts['genus']} topological tunnel/handle(s) (genus={counts['genus']}) - "
@@ -211,14 +207,37 @@ def format_report(report):
     return "\n".join(lines)
 
 
-def repair_mesh(in_path, out_path):
-    """
-    Run a PyMeshLab repair chain on in_path, saving to out_path.
-    Returns {"before": report, "after": report, "success": bool}.
-    Never overwrites in_path.
-    """
-    before = inspect_mesh(in_path)
+def _is_tunnel_issue(issue_text):
+    """True if a critical issue describes a topological tunnel/handle (genus>0).
 
+    Tunnels are not fixable by geometric repair (only a cut+cap removes them), so
+    a cleaned-but-genus>0 mesh is still a *successful* geometric repair — it just
+    needs the tunnel-loop step next. Mirrors the wording used in align_head.py.
+    """
+    t = issue_text.lower()
+    return "tunnel" in t or "genus" in t
+
+
+def _repair_pymeshfix(in_path, out_path):
+    """Primary repair: pymeshfix rebuilds a watertight 2-manifold, removing
+    self-intersections, non-manifold elements and boundaries while preserving
+    genus (tunnels). Raises if pymeshfix is unavailable or errors."""
+    import pymeshfix
+
+    ms = pymeshlab.MeshSet()
+    ms.load_new_mesh(str(in_path))
+    cm = ms.current_mesh()
+    mf = pymeshfix.MeshFix(cm.vertex_matrix(), cm.face_matrix())
+    mf.repair()
+
+    out = pymeshlab.MeshSet()
+    out.add_mesh(pymeshlab.Mesh(mf.points, mf.faces))
+    out.save_current_mesh(str(out_path))
+
+
+def _repair_pymeshlab(in_path, out_path):
+    """Fallback repair: the legacy PyMeshLab filter chain. Note this chain does
+    NOT remove self-intersections, so it can leave SI criticals behind."""
     ms = pymeshlab.MeshSet()
     ms.load_new_mesh(str(in_path))
 
@@ -241,9 +260,31 @@ def repair_mesh(in_path, out_path):
 
     ms.save_current_mesh(str(out_path))
 
+
+def repair_mesh(in_path, out_path):
+    """
+    Repair in_path, saving to out_path. Uses pymeshfix as the primary engine
+    (removes self-intersections + non-manifold + boundaries, preserves genus),
+    falling back to the legacy PyMeshLab chain if pymeshfix is unavailable/fails.
+    Returns {"before": report, "after": report, "success": bool, "engine": str}.
+    Never overwrites in_path.
+
+    success = no critical issues remain OTHER than topological tunnels (genus>0),
+    which are removed in the separate tunnel-loop / cut+cap step.
+    """
+    before = inspect_mesh(in_path)
+
+    engine = "pymeshfix"
+    try:
+        _repair_pymeshfix(in_path, out_path)
+    except Exception:
+        engine = "pymeshlab"
+        _repair_pymeshlab(in_path, out_path)
+
     after = inspect_mesh(out_path)
-    success = after["severity"] != "critical"
-    return {"before": before, "after": after, "success": success}
+    non_tunnel_criticals = [c for c in after.get("critical", []) if not _is_tunnel_issue(c["issue"])]
+    success = len(non_tunnel_criticals) == 0
+    return {"before": before, "after": after, "success": success, "engine": engine}
 
 
 def repair_graded(mesh_dir):
@@ -281,20 +322,80 @@ def repair_graded(mesh_dir):
             sev = "critical"
             any_critical = True
 
-        mesh_check[side.lower()] = {
-            "severity": sev,
-            "counts": result["after"]["counts"],
-        }
+        mesh_check[side.lower()] = (sev, result["after"]["counts"])
 
-    check_path = os.path.join(mesh_dir, "mesh_check.json")
-    with open(check_path, "w") as f:
-        json.dump(mesh_check, f, indent=4)
+    ProjectStore.for_mesh_dir(mesh_dir).write_check(MESH_GRADED, mesh_check)
 
     if any_critical:
-        log("[MESH_CHECK] Critical issues remain after repair. Step 3 is still blocked.")
+        log("[MESH_CHECK] Critical issues remain after repair. The Blender step is still blocked.")
         sys.exit(1)
     else:
         log("[MESH_CHECK] Repair complete. All critical issues resolved.")
+
+
+def _write_aligned_check(mesh_dir, report):
+    """Write aligned_check.json for the standalone Inspect & Fix step."""
+    ProjectStore.for_mesh_dir(mesh_dir).write_check(
+        MESH_ALIGNED, {"aligned": (report["severity"], report["counts"])})
+
+
+def inspect_aligned(mesh_dir):
+    """
+    Inspect aligned_head.ply in mesh_dir, print the report, and write
+    aligned_check.json. Exits non-zero if critical (used by the GUI's
+    standalone "Inspect & Fix Mesh" step).
+    """
+    def log(msg):
+        print(msg, flush=True)
+
+    path = os.path.join(mesh_dir, "aligned_head.ply")
+    if not os.path.exists(path):
+        log("[!] aligned_head.ply not found.")
+        sys.exit(1)
+
+    report = inspect_mesh(path)
+    log(format_report(report))
+    _write_aligned_check(mesh_dir, report)
+    sys.exit(0 if report["severity"] != "critical" else 1)
+
+
+def repair_aligned(mesh_dir):
+    """
+    Repair aligned_head.ply in place (pymeshfix primary), then rewrite
+    aligned_check.json from a fresh inspection. Geometry criticals (self-
+    intersections, non-manifold, boundaries) are fixed; topological tunnels
+    remain critical and are handled by the cut+cap / tunnel-loop step.
+    Exits non-zero if any critical (incl. tunnels) remains.
+    """
+    def log(msg):
+        print(msg, flush=True)
+
+    orig = os.path.join(mesh_dir, "aligned_head.ply")
+    if not os.path.exists(orig):
+        log("[!] aligned_head.ply not found.")
+        sys.exit(1)
+
+    repaired = orig + "_repaired.ply"
+    log("--> Repairing aligned_head.ply...")
+    result = repair_mesh(orig, repaired)
+    log(format_report(result["after"]))
+
+    if result["success"]:
+        os.replace(repaired, orig)
+        log(f"   Repair succeeded (engine={result['engine']}) — file updated.")
+    else:
+        if os.path.exists(repaired):
+            os.remove(repaired)
+        log("   Critical (non-tunnel) issues remain after repair.")
+
+    # Re-inspect the (possibly updated) file for the authoritative severity.
+    report = inspect_mesh(orig)
+    _write_aligned_check(mesh_dir, report)
+    if report["severity"] == "critical":
+        log("[MESH_CHECK] Critical issues remain (tunnels require the cut+cap step).")
+        sys.exit(1)
+    else:
+        log("[MESH_CHECK] Aligned mesh is clean. You may proceed to grading.")
 
 
 if __name__ == "__main__":
@@ -313,6 +414,12 @@ if __name__ == "__main__":
     p_graded = sub.add_parser("repair_graded", help="Repair Left/Right_Graded.ply in a mesh dir")
     p_graded.add_argument("mesh_dir", help="Directory containing Left_Graded.ply / Right_Graded.ply")
 
+    p_iali = sub.add_parser("inspect_aligned", help="Inspect aligned_head.ply in a mesh dir, write aligned_check.json")
+    p_iali.add_argument("mesh_dir", help="Directory containing aligned_head.ply")
+
+    p_rali = sub.add_parser("repair_aligned", help="Repair aligned_head.ply in place, write aligned_check.json")
+    p_rali.add_argument("mesh_dir", help="Directory containing aligned_head.ply")
+
     args = parser.parse_args()
 
     if args.cmd == "inspect":
@@ -330,6 +437,12 @@ if __name__ == "__main__":
 
     elif args.cmd == "repair_graded":
         repair_graded(args.mesh_dir)
+
+    elif args.cmd == "inspect_aligned":
+        inspect_aligned(args.mesh_dir)
+
+    elif args.cmd == "repair_aligned":
+        repair_aligned(args.mesh_dir)
 
     else:
         parser.print_help()

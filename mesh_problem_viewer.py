@@ -255,11 +255,11 @@ def _dual_cut_pairs(pv_mesh, genus, max_pins=5):
         pts = _np.asarray(mesh.points, dtype=_np.float64)
         faces = mesh.faces.reshape(-1, 4)[:, 1:].astype(_np.int64)
         pairs = select_cut_loop(pts, faces, genus, max_loops=max_pins)
-        return (pairs, pts) if pairs else ([], None)
+        return (pairs, pts, faces) if pairs else ([], None, None)
     except Exception as e:
         print(f"[tunnel] dual-pair path unavailable ({e}); using single loop",
               file=sys.stderr)
-        return [], None
+        return [], None, None
 
 
 def _draw_loop(plotter, loop_pts, color, name, width=6):
@@ -341,9 +341,10 @@ class TunnelSelector:
     confirm / override by clicking -- the suggestion is a starting point only.
     """
 
-    def __init__(self, plotter, pts, pairs, mesh_path=None):
+    def __init__(self, plotter, pts, pairs, mesh_path=None, faces=None):
         self.pl = plotter
         self.pts = np.asarray(pts)
+        self.faces = None if faces is None else np.asarray(faces)
         self.mesh_path = mesh_path
         self.center = self.pts.mean(0)
         self.diag = float(np.linalg.norm(self.pts.max(0) - self.pts.min(0)))
@@ -430,63 +431,153 @@ class TunnelSelector:
         except Exception as e:
             print(f"[tunnel] loop export failed: {e}", file=sys.stderr)
 
+    def _status(self, text, color):
+        try:
+            self.pl.add_text(text, position="upper_right", font_size=10,
+                             color=color, name="capstatus")
+            self.pl.render()
+        except Exception:
+            pass
 
-def add_tunnel_overlay(plotter, pv_mesh, genus, max_pins=5, mesh_path=None):
+    def apply_cut_and_cap(self):
+        """Delete the chosen cut loops' bands and cap the holes in-app, producing
+        a watertight genus-0 mesh. Saves over mesh_path and refreshes the aligned
+        quality check. Falls back to the exported loops (manual Blender) on any
+        failure, leaving the original file untouched."""
+        if self.faces is None or not self.mesh_path:
+            self._status("Cut & cap unavailable (no mesh data)", "#e6a09f")
+            return
+        try:
+            from tunnel_loop_extractor import cut_and_cap_loops
+            cut_loops = [h["loops"][h["sel"]] for h in self.handles]
+            self._status("Applying cut & cap...", "#e6d79f")
+            new_pts, new_faces = cut_and_cap_loops(self.pts, self.faces, cut_loops)
+
+            faces_pv = np.hstack(
+                [np.full((len(new_faces), 1), 3, dtype=np.int64),
+                 new_faces.astype(np.int64)]).ravel()
+            out = pv.PolyData(new_pts, faces_pv)
+            out.save(self.mesh_path)
+
+            # Refresh the aligned-mesh quality check next to the saved file.
+            try:
+                import mesh_inspector
+                report = mesh_inspector.inspect_mesh(self.mesh_path)
+                mesh_inspector._write_aligned_check(
+                    os.path.dirname(self.mesh_path), report)
+            except Exception as e:
+                print(f"[tunnel] aligned_check refresh failed: {e}", file=sys.stderr)
+
+            self._status(
+                "Cut & cap applied -> genus 0. Saved.\n"
+                "Close this window and click 'Inspect & Fix Mesh' to re-validate.",
+                "#9fe6a0")
+            print("[tunnel] cut & cap applied; mesh saved watertight (genus 0).",
+                  flush=True)
+        except Exception as e:
+            self._status(
+                f"Auto cut & cap failed: {e}\n"
+                "Use the exported loop for a manual Blender cut instead.",
+                "#e6a09f")
+            print(f"[tunnel] cut & cap failed: {e}", file=sys.stderr)
+
+
+def _mesh_to_arrays(pv_mesh):
+    """Triangulate+clean a pyvista mesh to (pts, faces) ndarrays. Do this on the
+    MAIN thread (it uses VTK data filters) and hand the arrays to the worker so
+    the worker stays VTK-free."""
+    mesh = pv_mesh.triangulate().clean()
+    pts = np.asarray(mesh.points, dtype=np.float64)
+    faces = mesh.faces.reshape(-1, 4)[:, 1:].astype(np.int64)
+    return pts, faces
+
+
+def compute_tunnel_data(pts, faces, genus, *, max_pins=5, progress_cb=None):
+    """Worker-safe (no VTK rendering): compute the cut-loop data to overlay.
+
+    Returns a dict describing what to draw:
+      {"mode":"pairs", pairs, pts, faces}  -- dual loop pairs (click-to-select)
+      {"mode":"tight", idx_loops, pts, faces} -- single tight loops (export only)
+      {"mode":"none"}
+    Used by the viewer's background thread; pts/faces must already be the cleaned
+    arrays (see _mesh_to_arrays). Heavy work (tree-cotree, tighten, dual loop) is
+    pure numpy/scipy/networkx and is safe off the GUI thread.
     """
-    Overlay the topological cut loops on the plotter. Call when genus > 0.
-    Returns a dict {rendered, tight, export_txt, n_loops, focus, selector} or False.
+    try:
+        from tunnel_loop_locator import select_cut_loop
+        pairs = select_cut_loop(pts, faces, genus, max_loops=max_pins,
+                                progress_cb=progress_cb)
+        if pairs:
+            return {"mode": "pairs", "pairs": pairs, "pts": pts, "faces": faces}
+    except Exception as e:
+        print(f"[tunnel] dual-pair path failed ({e})", file=sys.stderr)
 
-    Preferred path: render the DUAL loop pair per handle and return a
-    TunnelSelector so the caller can enable click-to-choose. GREEN 'Cut here' is
-    the suggested loop to remove, RED 'Avoid' the other member; the user clicks
-    to confirm/override (the auto-suggestion is not reliable across meshes).
-    Falls back to the single tight loop, then the loose tree-cotree loop, if the
-    newer modules are unavailable.
-    """
-    export_txt = None
+    try:
+        from tunnel_loop_extractor import extract_tight_cut_loops
+        idx_loops = extract_tight_cut_loops(pts, faces, genus, max_pins=max_pins)
+        if idx_loops:
+            return {"mode": "tight", "idx_loops": idx_loops, "pts": pts, "faces": faces}
+    except Exception as e:
+        print(f"[tunnel] tight-loop path failed ({e})", file=sys.stderr)
 
-    # --- preferred: dual pair, interactive cut/avoid selection --------------
-    pairs, pts = _dual_cut_pairs(pv_mesh, genus, max_pins=max_pins)
-    if pairs and pts is not None:
-        selector = TunnelSelector(plotter, pts, pairs, mesh_path=mesh_path)
+    return {"mode": "none"}
+
+
+def render_tunnel_data(plotter, data, mesh_path=None):
+    """Main-thread: draw the computed tunnel data onto the plotter. Returns the
+    same dict shape add_tunnel_overlay used (rendered, tight, export_txt,
+    n_loops, focus, selector) or False if nothing to draw."""
+    mode = data.get("mode")
+
+    if mode == "pairs":
+        pts, faces, pairs = data["pts"], data["faces"], data["pairs"]
+        selector = TunnelSelector(plotter, pts, pairs, mesh_path=mesh_path, faces=faces)
         return {"rendered": True, "tight": True,
                 "export_txt": selector.export_txt, "n_loops": len(pairs),
                 "focus": selector.focus_points(), "selector": selector}
 
-    # --- fallback 1: single tight loop --------------------------------------
-    is_tight = True
-    pins, loops, idx_loops, pts = _tight_cut_loops(pv_mesh, genus, max_pins=max_pins)
+    if mode == "tight":
+        pts, idx_loops = data["pts"], data["idx_loops"]
+        export_txt = None
+        if mesh_path:
+            try:
+                from tunnel_loop_locator import export_loops_for_blender
+                prefix = os.path.splitext(mesh_path)[0] + "_cut"
+                _, export_txt = export_loops_for_blender(pts, idx_loops, prefix)
+            except Exception as e:
+                print(f"[tunnel] loop export failed: {e}", file=sys.stderr)
+        loops = [pts[lp] for lp in idx_loops]
+        pins = [pts[lp].mean(0) for lp in idx_loops]
+        for i, loop_pts in enumerate(loops):
+            _draw_loop(plotter, loop_pts, 'magenta', f'tunnel_loop_{i}')
+        _add_labels(plotter, pins, ['Cut here'] * len(pins), 'magenta', 'tunnel_labels')
+        plotter.render()
+        return {"rendered": True, "tight": True, "export_txt": export_txt,
+                "n_loops": len(loops),
+                "focus": [list(map(float, p)) for p in pins]}
 
-    if pins and loops and mesh_path:
-        try:
-            from tunnel_loop_locator import export_loops_for_blender
-            prefix = os.path.splitext(mesh_path)[0] + "_cut"
-            _, export_txt = export_loops_for_blender(pts, idx_loops, prefix)
-        except Exception as e:
-            print(f"[tunnel] loop export failed: {e}", file=sys.stderr)
+    return False
 
-    # --- fallback 2: loose tree-cotree loop ---------------------------------
-    if not pins or not loops:
-        is_tight = False
-        pins, loops = _topological_tunnel_loops(pv_mesh, genus, max_pins=max_pins)
 
-    if not pins or not loops:
-        return False
-
-    for i, loop_pts in enumerate(loops):
-        _draw_loop(plotter, loop_pts, 'magenta', f'tunnel_loop_{i}')
-    _add_labels(plotter, list(pins),
-                ['Cut here' if is_tight else 'Tunnel?'] * len(pins),
-                'magenta', 'tunnel_labels')
-
-    plotter.render()
-    return {"rendered": True, "tight": is_tight, "export_txt": export_txt,
-            "n_loops": len(loops)}
+def add_tunnel_overlay(plotter, pv_mesh, genus, max_pins=5, mesh_path=None):
+    """
+    Overlay the topological cut loops on the plotter (synchronous; main thread).
+    Kept for callers that want a one-shot overlay; the embedded viewer instead
+    uses compute_tunnel_data (in a worker) + render_tunnel_data (main thread).
+    Returns {rendered, tight, export_txt, n_loops, focus, selector} or False.
+    """
+    pts, faces = _mesh_to_arrays(pv_mesh)
+    data = compute_tunnel_data(pts, faces, genus, max_pins=max_pins)
+    return render_tunnel_data(plotter, data, mesh_path=mesh_path)
 
 
 # ---------------------------------------------------------------------------
-# Standalone viewer — native pv.Plotter (no Qt embedding) to avoid the
-# wglMakeCurrent / shared-GL-context crashes seen with pyvistaqt.QtInteractor.
+# Standalone viewer — PySide6 + pyvistaqt.QtInteractor so the window appears
+# immediately with the base mesh + a progress bar while the (slow) cut-loop
+# computation runs in a background QThread. Uses the same QtInteractor pattern
+# proven in align_head.py / _vtk_viewer.py. The OLD native-pv.Plotter wgl crash
+# was specific to that earlier embedding attempt; the worker here never touches
+# VTK/GL off the main thread (it only runs numpy/scipy/networkx).
 # ---------------------------------------------------------------------------
 
 def _build_legend(lines):
@@ -522,33 +613,13 @@ def _orient_camera_to(pl, mesh, issue_point):
         print(f"[tunnel] camera orient skipped: {e}", file=sys.stderr)
 
 
-def view_mesh_problems(mesh_path):
-    """
-    Open a native PyVista window showing all detected mesh problems:
-      • Red lines    — boundary / non-manifold edges
-      • Colour bands — disconnected components
-      • Yellow faces — self-intersecting faces (requires pymeshlab)
-      • Magenta loop + 'Tunnel?' pin — topological tunnels (genus > 0)
-
-    Press R to reset the camera.  Close the window to exit.
-    """
-    if not os.path.exists(mesh_path):
-        print(f"Error: file not found: {mesh_path}", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        mesh = pv.read(mesh_path)
-    except Exception as e:
-        print(f"Error loading mesh: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    pl = pv.Plotter(title=f"Mesh Problems — {os.path.basename(mesh_path)}")
-    pl.set_background("#1d1d1d")
-
-    # Base mesh — semi-transparent surface.
-    # Recompute outward-pointing normals so a mesh with inverted/inconsistent
-    # normals (the kind that renders solid black in MeshLab) still shades
-    # correctly here; add ambient light so it can never go fully dark.
+def _add_static_overlays(pl, mesh, mesh_path):
+    """Render the FAST problem overlays (base mesh, boundary/non-manifold edges,
+    components, self-intersections) on the plotter and return legend lines.
+    These are quick, so they go up immediately while the tunnel loops compute."""
+    # Base mesh — semi-transparent surface. Recompute outward-pointing normals so
+    # a mesh with inverted/inconsistent normals (solid black in MeshLab) still
+    # shades correctly; ambient light so it can never go fully dark.
     try:
         mesh_disp = mesh.compute_normals(auto_orient_normals=True,
                                          consistent_normals=True, inplace=False)
@@ -558,25 +629,19 @@ def view_mesh_problems(mesh_path):
                 ambient=0.35, diffuse=0.6, specular=0.05, name="surface")
 
     legend_lines = []
-
-    # ---- Boundary + non-manifold edges (red) --------------------------------
     try:
         problem_edges = mesh.extract_feature_edges(
-            boundary_edges=True,
-            non_manifold_edges=True,
-            feature_edges=False,
-            manifold_edges=False,
-        )
+            boundary_edges=True, non_manifold_edges=True,
+            feature_edges=False, manifold_edges=False)
         if problem_edges.n_points > 0:
             pl.add_mesh(problem_edges, color="red", line_width=3,
                         name="problem_edges", render_lines_as_tubes=True)
             legend_lines.append("Red lines: boundary/non-manifold edges")
         else:
-            legend_lines.append("✓ No boundary or non-manifold edges")
+            legend_lines.append("[OK] No boundary or non-manifold edges")
     except Exception as e:
         legend_lines.append(f"Edge check error: {e}")
 
-    # ---- Connected components (colour bands) --------------------------------
     try:
         labeled = mesh.connectivity(largest=False)
         n_regions = (int(labeled.get_array("RegionId").max()) + 1
@@ -586,11 +651,10 @@ def view_mesh_problems(mesh_path):
                         opacity=0.7, show_scalar_bar=False, name="components")
             legend_lines.append(f"Colours: {n_regions} disconnected components")
         else:
-            legend_lines.append("✓ Single connected component")
+            legend_lines.append("[OK] Single connected component")
     except Exception as e:
         legend_lines.append(f"Component check error: {e}")
 
-    # ---- Self-intersecting faces (yellow, requires pymeshlab) ---------------
     try:
         import pymeshlab
         ms = pymeshlab.MeshSet()
@@ -608,87 +672,301 @@ def view_mesh_problems(mesh_path):
                         if ms.current_mesh().face_is_selected(i)]
             si_mesh = mesh.extract_cells(face_ids) if face_ids else None
             if si_mesh and si_mesh.n_points > 0:
-                pl.add_mesh(si_mesh, color="yellow", opacity=0.85,
-                            name="si_faces")
+                pl.add_mesh(si_mesh, color="yellow", opacity=0.85, name="si_faces")
                 legend_lines.append(f"Yellow faces: {n_si} self-intersection(s)")
         else:
-            legend_lines.append("✓ No self-intersecting faces")
+            legend_lines.append("[OK] No self-intersecting faces")
     except Exception as e:
         legend_lines.append(f"Self-intersection check: {e}")
 
-    # ---- Topological tunnels / handles (magenta loop, tree-cotree) ----------
-    try:
-        import mesh_inspector
-        report = mesh_inspector.inspect_mesh(mesh_path)
-        genus  = report["counts"].get("genus", 0)
-        if genus > 0:
-            print(f"[tunnel] genus={genus}; computing tight cut loop "
-                  f"(may take ~10-15 s)...", flush=True)
-            found = add_tunnel_overlay(pl, mesh, genus, mesh_path=mesh_path)
-            if found and isinstance(found, dict) and found.get("tight"):
-                msg = (f"{found['n_loops']} tunnel/handle(s) — each has TWO candidate "
-                       f"cut loops (a dual pair).\n"
-                       f"  GREEN 'Cut here' = chosen loop to delete+cap; RED 'Avoid' "
-                       f"= the other.\n"
-                       f"  CLICK a ring to choose which one to cut (auto-pick is a "
-                       f"suggestion only).")
-                if found.get("export_txt"):
-                    msg += f"\n  Chosen cut loop exported: {os.path.basename(found['export_txt'])}"
-                legend_lines.append(msg)
-            elif found:
-                legend_lines.append(
-                    f"Magenta loop(s): {genus} topological tunnel/handle(s)\n"
-                    f"  (loose loop threads the hole — follow it to the opening)"
-                )
-            else:
-                legend_lines.append(
-                    f"genus={genus} (tunnel detected) — loop extraction failed\n"
-                    f"  Check mesh manually in Blender"
-                )
-    except Exception as e:
-        legend_lines.append(f"Tunnel check: {e}")
+    return legend_lines
 
-    # ---- On-canvas legend ---------------------------------------------------
-    legend_text = _build_legend(legend_lines)
-    pl.add_text(legend_text, position="upper_left", font_size=10,
-                color="white", name="legend")
-    pl.add_text("Press R to reset camera", position="lower_left",
-                font_size=9, color="#aaaaaa")
 
-    pl.add_key_event('r', lambda: pl.reset_camera())
+def _enable_loop_picking(pl, selector):
+    """Wire click-to-select and the C = Apply Cut & Cap key onto the plotter."""
+    def _on_pick(*a):
+        selector.on_pick(*a)
+    for kwargs in (
+        dict(callback=_on_pick, left_clicking=True, show_message=False,
+             show_point=False, use_picker=True),
+        dict(callback=_on_pick, left_clicking=True),
+        dict(callback=_on_pick),
+    ):
+        try:
+            pl.enable_point_picking(**kwargs)
+            break
+        except TypeError:
+            continue
+        except Exception as e:
+            print(f"[tunnel] click-to-select unavailable: {e}", file=sys.stderr)
+            break
+    pl.add_text("Click a ring to choose the CUT loop (green)\n"
+                "Press C to Apply Cut & Cap (auto-remove the tunnel)",
+                position="lower_right", font_size=9, color="#9fe6a0",
+                name="pick_hint")
+    pl.add_key_event('c', lambda: selector.apply_cut_and_cap())
 
-    # Enable click-to-choose for the cut loop, if a selector was created.
-    _found = locals().get("found")
-    selector = _found.get("selector") if isinstance(_found, dict) else None
-    if selector is not None:
-        def _on_pick(*a):
-            selector.on_pick(*a)
-        for kwargs in (
-            dict(callback=_on_pick, left_clicking=True, show_message=False,
-                 show_point=False, use_picker=True),
-            dict(callback=_on_pick, left_clicking=True),
-            dict(callback=_on_pick),
-        ):
+
+def view_mesh_problems(mesh_path):
+    """
+    Open a PySide6 window showing all detected mesh problems:
+      - Red lines    : boundary / non-manifold edges
+      - Colour bands : disconnected components
+      - Yellow faces : self-intersecting faces (requires pymeshlab)
+      - Green/red rings : topological tunnel cut loops (genus > 0)
+
+    The window appears immediately with the base mesh + the fast overlays, and a
+    progress bar runs while the (slow) cut-loop computation happens in a worker
+    thread. Press R to reset the camera; close the window to exit.
+    """
+    if not os.path.exists(mesh_path):
+        print(f"Error: file not found: {mesh_path}", file=sys.stderr)
+        sys.exit(1)
+
+    os.environ.setdefault("QT_API", "pyside6")
+    from PySide6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    window_cls = _build_qt_classes()
+    win = window_cls(mesh_path)
+    win.show()
+    app.exec()
+
+
+BG_COLOR     = "#1d1d1d"
+PANEL_COLOR  = "#2b2b2b"
+TEXT_COLOR   = "#ffffff"
+ACCENT_COLOR = "#3B8ED0"
+SUCCESS_COLOR = "#2cc985"
+ERROR_COLOR  = "#c0392b"
+
+
+def _build_qt_classes():
+    """Define the Qt window + worker lazily so importing this module does not
+    require PySide6/pyvistaqt (keeps the CLI helpers and tests import-light)."""
+    from PySide6 import QtCore, QtWidgets
+    from pyvistaqt import QtInteractor
+
+    class _TunnelWorker(QtCore.QThread):
+        progress = QtCore.Signal(str)
+        done = QtCore.Signal(object)
+
+        def __init__(self, pts, faces, genus):
+            super().__init__()
+            self._pts, self._faces, self._genus = pts, faces, genus
+
+        def run(self):
             try:
-                pl.enable_point_picking(**kwargs)
-                break
-            except TypeError:
-                continue
+                data = compute_tunnel_data(self._pts, self._faces, self._genus,
+                                           progress_cb=self.progress.emit)
             except Exception as e:
-                print(f"[tunnel] click-to-select unavailable: {e}", file=sys.stderr)
-                break
-        pl.add_text("Click a ring to choose the CUT loop (green)",
-                    position="lower_right", font_size=9, color="#9fe6a0",
-                    name="pick_hint")
+                print(f"[tunnel] worker error: {e}", file=sys.stderr)
+                data = {"mode": "none"}
+            self.done.emit(data)
 
-    pl.reset_camera()
-    # Face the side where the tunnel was detected (otherwise the default camera
-    # often opens on the opposite side of the head from the issue).
-    focus_pts = _found.get("focus") if isinstance(_found, dict) else None
-    if focus_pts:
-        _orient_camera_to(pl, mesh, np.array(focus_pts[0], dtype=float))
+    class _ProblemViewerWindow(QtWidgets.QMainWindow):
+        def __init__(self, mesh_path):
+            super().__init__()
+            self.mesh_path = mesh_path
+            self.setWindowTitle(f"Mesh Problems - {os.path.basename(mesh_path)}")
+            self.resize(1300, 800)
 
-    pl.show()
+            self.setStyleSheet(f"""
+                QMainWindow {{ background-color: {BG_COLOR}; }}
+                QWidget {{ background-color: {BG_COLOR}; color: {TEXT_COLOR};
+                           font-family: 'Segoe UI', sans-serif; }}
+                QFrame#ControlPanel {{ background-color: {PANEL_COLOR}; border-radius: 10px; }}
+                QPushButton {{ background-color: {ACCENT_COLOR}; border-radius: 5px;
+                               padding: 8px; font-weight: bold; color: {TEXT_COLOR}; }}
+                QPushButton:disabled {{ background-color: #444; color: #888; }}
+                QProgressBar {{ border: none; background: #444; border-radius: 4px; }}
+                QProgressBar::chunk {{ background: {ACCENT_COLOR}; border-radius: 4px; }}
+            """)
+
+            central = QtWidgets.QWidget()
+            self.setCentralWidget(central)
+            main_layout = QtWidgets.QHBoxLayout(central)
+            main_layout.setContentsMargins(0, 0, 0, 0)
+            main_layout.setSpacing(0)
+
+            # Left: plotter container
+            self.plotter_container = QtWidgets.QWidget()
+            pc_layout = QtWidgets.QVBoxLayout(self.plotter_container)
+            pc_layout.setContentsMargins(0, 0, 0, 0)
+            self.plotter = QtInteractor(self.plotter_container)
+            pc_layout.addWidget(self.plotter)
+            main_layout.addWidget(self.plotter_container, stretch=3)
+
+            # Central progress overlay (child of plotter_container, positioned by resizeEvent)
+            self._overlay = QtWidgets.QFrame(self.plotter_container)
+            self._overlay.setStyleSheet(
+                "background: rgba(30,30,30,210); border-radius: 10px;")
+            ov_lay = QtWidgets.QVBoxLayout(self._overlay)
+            self._overlay_label = QtWidgets.QLabel("Computing cut loops...")
+            self._overlay_label.setStyleSheet(
+                "font-size: 14px; font-weight: bold; color: white; background: transparent;")
+            self._overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self._overlay_label.setWordWrap(True)
+            ov_bar = QtWidgets.QProgressBar()
+            ov_bar.setRange(0, 0)
+            ov_bar.setFixedHeight(8)
+            ov_lay.addWidget(self._overlay_label)
+            ov_lay.addWidget(ov_bar)
+            self._overlay.hide()
+
+            # Right: control panel
+            panel = QtWidgets.QFrame()
+            panel.setObjectName("ControlPanel")
+            panel.setFixedWidth(300)
+            panel_layout = QtWidgets.QVBoxLayout(panel)
+            panel_layout.setContentsMargins(12, 16, 12, 16)
+            panel_layout.setSpacing(10)
+            main_layout.addWidget(panel, stretch=1)
+
+            lbl_title = QtWidgets.QLabel(f"Mesh Problems\n{os.path.basename(mesh_path)}")
+            lbl_title.setStyleSheet("font-size: 13px; font-weight: bold;")
+            lbl_title.setWordWrap(True)
+            panel_layout.addWidget(lbl_title)
+
+            lbl_instr = QtWidgets.QLabel(
+                "Click a ring to choose the green CUT loop.\n"
+                "Red = avoid. Press C to apply cut & cap.")
+            lbl_instr.setWordWrap(True)
+            lbl_instr.setStyleSheet(f"color: #aaa; font-size: 11px; background: transparent;")
+            panel_layout.addWidget(lbl_instr)
+
+            self._panel_status = QtWidgets.QLabel("Loading mesh...")
+            self._panel_status.setWordWrap(True)
+            self._panel_status.setStyleSheet(
+                f"color: #ccc; font-size: 11px; background: transparent;")
+            panel_layout.addWidget(self._panel_status)
+
+            panel_layout.addStretch()
+
+            self._btn_cut = QtWidgets.QPushButton("Apply Cut && Cap  [C]")
+            self._btn_cut.setEnabled(False)
+            panel_layout.addWidget(self._btn_cut)
+
+            self._btn_reset = QtWidgets.QPushButton("Reset Camera  [R]")
+            self._btn_reset.setEnabled(False)
+            self._btn_reset.clicked.connect(lambda: self.plotter.reset_camera())
+            panel_layout.addWidget(self._btn_reset)
+
+            self._btn_export = QtWidgets.QPushButton("Export Loops for Blender")
+            self._btn_export.setEnabled(False)
+            panel_layout.addWidget(self._btn_export)
+
+            self._btn_close = QtWidgets.QPushButton("Save && Close")
+            self._btn_close.setEnabled(False)
+            self._btn_close.clicked.connect(self.close)
+            panel_layout.addWidget(self._btn_close)
+
+            # Status bar: slim label only (overlay is the prominent indicator)
+            self.status_label = QtWidgets.QLabel("Loading mesh...")
+            self.statusBar().addWidget(self.status_label, 1)
+
+            self.plotter.set_background(BG_COLOR)
+
+            try:
+                self.mesh = pv.read(mesh_path)
+            except Exception as e:
+                self.status_label.setText(f"Error loading mesh: {e}")
+                self._panel_status.setText(f"Error: {e}")
+                return
+
+            self.legend_lines = _add_static_overlays(self.plotter, self.mesh, mesh_path)
+            self._refresh_legend()
+            self.plotter.add_text("Press R to reset camera", position="lower_left",
+                                  font_size=9, color="#aaaaaa", name="resethint")
+            self.plotter.add_key_event('r', lambda: self.plotter.reset_camera())
+            self.plotter.reset_camera()
+
+            # genus check, then launch the worker for the slow loop compute
+            genus = 0
+            try:
+                import mesh_inspector
+                genus = mesh_inspector.inspect_mesh(mesh_path)["counts"].get("genus", 0)
+            except Exception as e:
+                self.legend_lines.append(f"Tunnel check: {e}")
+                self._refresh_legend()
+
+            if genus <= 0:
+                self.status_label.setText("No tunnels (genus 0).")
+                self._panel_status.setText("No tunnels detected.")
+                self._btn_reset.setEnabled(True)
+                self._btn_close.setEnabled(True)
+                return
+
+            self.status_label.setText(f"genus={genus}: computing cut loops...")
+            self._panel_status.setText(f"genus={genus}: computing cut loops...")
+            pts, faces = _mesh_to_arrays(self.mesh)
+            self._worker = _TunnelWorker(pts, faces, genus)
+            self._worker.progress.connect(self._on_progress)
+            self._worker.done.connect(self._on_done)
+            self._worker.start()
+            self._overlay.show()
+            self._overlay.raise_()
+
+        def resizeEvent(self, ev):
+            super().resizeEvent(ev)
+            if hasattr(self, '_overlay'):
+                r = self.plotter_container.rect()
+                w, h = 400, 80
+                self._overlay.setGeometry(
+                    (r.width() - w) // 2, (r.height() - h) // 2, w, h)
+                self._overlay.raise_()
+
+        def _refresh_legend(self):
+            self.plotter.add_text(_build_legend(self.legend_lines),
+                                  position="upper_left", font_size=10,
+                                  color="white", name="legend")
+
+        def _on_progress(self, msg):
+            self.status_label.setText(msg)
+            self._overlay_label.setText(msg)
+            self._panel_status.setText(msg)
+
+        def _on_done(self, data):
+            self._overlay.hide()
+            self._btn_reset.setEnabled(True)
+            self._btn_close.setEnabled(True)
+
+            found = render_tunnel_data(self.plotter, data, mesh_path=self.mesh_path)
+            if found and found.get("selector") is not None:
+                sel = found["selector"]
+                _enable_loop_picking(self.plotter, sel)
+                self._btn_cut.setEnabled(True)
+                self._btn_cut.clicked.connect(sel.apply_cut_and_cap)
+                self._btn_export.setEnabled(True)
+                self._btn_export.clicked.connect(sel.export)
+                msg = (f"{found['n_loops']} tunnel/handle(s) - each has TWO candidate "
+                       "cut loops (dual pair). GREEN 'Cut here' = chosen, RED 'Avoid' "
+                       "= other. CLICK a ring to choose; press C to cut & cap.")
+                if found.get("export_txt"):
+                    msg += f" Exported: {os.path.basename(found['export_txt'])}"
+                self.legend_lines.append(msg)
+                self.status_label.setText("Click a ring to choose the cut loop, then press C.")
+                self._panel_status.setText(
+                    f"{found['n_loops']} tunnel(s) found. GREEN = cut, RED = avoid. "
+                    "Click ring or press C.")
+            elif found:
+                self.legend_lines.append(
+                    f"{found['n_loops']} tunnel loop(s) shown (magenta). "
+                    "Export written for a manual Blender cut.")
+                self.status_label.setText("Tunnel loop(s) located.")
+                self._panel_status.setText(f"{found['n_loops']} tunnel loop(s) shown.")
+            else:
+                self.legend_lines.append(
+                    "Tunnel detected but loop extraction failed - check in Blender.")
+                self.status_label.setText("Loop extraction failed.")
+                self._panel_status.setText("Loop extraction failed.")
+            self._refresh_legend()
+
+            focus_pts = found.get("focus") if isinstance(found, dict) else None
+            if focus_pts:
+                _orient_camera_to(self.plotter, self.mesh,
+                                  np.array(focus_pts[0], dtype=float))
+
+    return _ProblemViewerWindow
 
 
 def main():

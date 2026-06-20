@@ -10,6 +10,11 @@ venv/
 # Ignores local path settings so others don't overwrite their configs
 project.json
 claude.md
+context.md
+
+# --- Local agent tooling (Claude Code) ---
+# Personal/local-only: skills, slash commands, local settings. Never published.
+.claude/
 
 # --- Large Data & Simulation Outputs ---
 # Based on folders created in your create_new_project function
@@ -18,13 +23,14 @@ Output/
 Meshes/
 bin/
 Backup/
-zzMesh2SOFA/
+zz*/
 sofa_*/
 plan*/
 *output*/
 projects/
 memory/
 research/
+docs/
 
 # --- 3D Intermediate Files ---
 # Ignore generated blend files, but keep your 3d_Reference.blend template

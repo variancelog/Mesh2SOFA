@@ -51,7 +51,7 @@ from tunnel_loop_extractor import (
 # ---------------------------------------------------------------------------
 # LOCATE + TIGHTEN  (the reliable part)
 # ---------------------------------------------------------------------------
-def locate_cut_loops(pts, faces, genus, *, max_loops=5):
+def locate_cut_loops(pts, faces, genus, *, max_loops=5, progress_cb=None):
     """
     Return a list of tight, severing cut loops (one per handle), each an
     ordered ndarray of vertex indices. Does NOT modify the mesh.
@@ -60,13 +60,24 @@ def locate_cut_loops(pts, faces, genus, *, max_loops=5):
     cutting its 1-ring band drops genus by one, opens exactly two holes, and
     keeps the surface in one piece. The loop is tightened to a short ring so
     it is easy to locate and select.
+
+    progress_cb(msg) is an optional callable for status updates (used by the
+    viewer's worker thread); it must be safe to call from a background thread.
     """
+    def _emit(msg):
+        if progress_cb is not None:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+
     pts = np.asarray(pts, dtype=np.float64)
     faces = np.asarray(faces)
     g0 = mesh_genus(pts, faces)
     if g0 <= 0:
         return []
 
+    _emit("Building tree-cotree homology...")
     eid, elist, e2f, adj = _build_edges(pts, faces)
     parent, intree = _primal_forest(len(pts), adj)
     cotree = _dual_forest(len(faces), elist, e2f, intree)
@@ -78,11 +89,13 @@ def locate_cut_loops(pts, faces, genus, *, max_loops=5):
     for (u, v) in elist:
         G.add_edge(u, v, weight=float(np.linalg.norm(pts[u] - pts[v])))
 
+    want = min(genus, max_loops)
     loops, centroids = [], []
     for g in gens:
         loose = _loose_loop(g, elist, parent)
         if not _severs(pts, faces, loose, g0):
             continue
+        _emit(f"Tightening cut loop {len(loops) + 1}/{want}...")
         tight = _tighten_loop(pts, faces, loose, G, g0)
         if not _severs(pts, faces, tight, g0):
             tight = loose
@@ -91,7 +104,7 @@ def locate_cut_loops(pts, faces, genus, *, max_loops=5):
             continue
         loops.append(tight)
         centroids.append(c)
-        if len(loops) >= min(genus, max_loops):
+        if len(loops) >= want:
             break
     return loops
 
@@ -140,7 +153,7 @@ def disk_in_solid(mesh_pv, pts, loop, grid=7):
     return float(np.asarray(sel["SelectedPoints"]).mean())
 
 
-def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5):
+def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5, progress_cb=None):
     """For each handle, return the dual loop pair labelled cut vs avoid.
 
     Pipeline:
@@ -155,11 +168,21 @@ def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5):
     If B cannot be generated, falls back to {"cut": A, "avoid": None, ...} so the
     caller still gets the located loop.
     """
+    def _emit(msg):
+        if progress_cb is not None:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+
     pts = np.asarray(pts, dtype=np.float64)
     faces = np.asarray(faces)
     mesh_pv = _as_pv(pts, faces)
+    located = locate_cut_loops(pts, faces, genus, max_loops=max_loops,
+                               progress_cb=progress_cb)
     results = []
-    for A in locate_cut_loops(pts, faces, genus, max_loops=max_loops):
+    for hi, A in enumerate(located):
+        _emit(f"Computing dual loop {hi + 1}/{len(located)}...")
         B = dual_crossing_loop(pts, faces, A)
         disk_A = disk_in_solid(mesh_pv, pts, A)
         if B is None:

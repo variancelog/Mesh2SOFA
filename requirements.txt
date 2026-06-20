@@ -17,10 +17,11 @@ vtk
 
 # --- Mesh processing ---
 pymeshlab
+pymeshfix       # primary mesh repair engine (removes self-intersections / non-manifold)
 networkx        # tree-cotree homology for tunnel/handle (genus) loop detection
 
 # --- Numerics, SOFA & plotting ---
 numpy
-scipy
+scipy           # vectorized genus / connected-components + Dijkstra for fast loop finding
 matplotlib
 sofar

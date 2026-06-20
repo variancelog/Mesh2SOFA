@@ -9,6 +9,8 @@ import threading
 import queue
 import ctypes
 
+from project_store import ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED
+
 # Hide the console window so running as .py looks like .pyw (no terminal).
 # A real (hidden) console still exists, so child processes (e.g. NumCalc.exe)
 # can inherit it without spawning their own console windows.
@@ -301,12 +303,12 @@ class GridSelectionDialog(ctk.CTkToplevel):
         self.destroy()
 
 class MeshQualityDialog(ctk.CTkToplevel):
-    """Dialog shown when graded meshes have critical quality issues after Step 2."""
+    """Dialog shown when graded meshes have critical quality issues (blocks Blender)."""
     def __init__(self, parent, mesh_path, callback):
         super().__init__(parent)
         self.callback = callback
         self.mesh_path = mesh_path
-        self.title("Mesh Quality Issues — Step 3 Blocked")
+        self.title("Mesh Quality Issues — Blender Blocked")
         self.geometry("500x210")
         self.resizable(False, False)
         self.lift()
@@ -316,7 +318,7 @@ class MeshQualityDialog(ctk.CTkToplevel):
 
         lbl = ctk.CTkLabel(self,
             text="One or more graded meshes have critical quality issues.\n"
-                 "Step 3 (Blender) is blocked until they are resolved.\n\n"
+                 "The Blender step is blocked until they are resolved.\n\n"
                  "Repair automatically, or open the problem viewer to inspect.",
             font=("Roboto", 13))
         lbl.pack(pady=20, padx=20)
@@ -333,6 +335,52 @@ class MeshQualityDialog(ctk.CTkToplevel):
 
     def on_repair(self):    self.callback("repair", self.mesh_path);    self.destroy()
     def on_visualize(self): self.callback("visualize", self.mesh_path); self.destroy()
+    def on_cancel(self):    self.destroy()
+
+
+class AlignedMeshDialog(ctk.CTkToplevel):
+    """Dialog for the standalone 'Inspect & Fix Mesh' step (operates on the
+    aligned mesh). Repair is suppressed when the only criticals are topological
+    tunnels (genus>0), which geometric repair cannot fix — those go to the
+    interactive tunnel viewer for click-to-select + cut & cap."""
+    def __init__(self, parent, mesh_dir, summary, tunnel_only, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.mesh_dir = mesh_dir
+        self.title("Mesh Quality Issues — Inspect & Fix")
+        self.geometry("560x300")
+        self.resizable(False, False)
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus()
+        self.grab_set()
+
+        if tunnel_only:
+            hint = ("Topological tunnel(s) detected. Geometric repair cannot fix these —\n"
+                    "open the tunnel viewer, click the cut loop, and Apply Cut & Cap.")
+        else:
+            hint = ("Critical mesh issues found. Attempt Repair (pymeshfix) to clean\n"
+                    "self-intersections / non-manifold / boundaries, then re-inspect.")
+        ctk.CTkLabel(self, text=hint, font=("Roboto", 13), justify="left").pack(pady=(16, 6), padx=20)
+
+        box = ctk.CTkTextbox(self, height=110, width=520)
+        box.pack(pady=6, padx=20, fill="both", expand=False)
+        box.insert("end", summary)
+        box.configure(state="disabled")
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=10, fill="x")
+
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="transparent", border_width=1,
+                      text_color=("gray10", "#DCE4EE"), command=self.on_cancel).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Fix Tunnels (Viewer)", fg_color="#C0392B",
+                      hover_color="#A93226", command=self.on_visualize).pack(side="right", padx=10)
+        if not tunnel_only:
+            ctk.CTkButton(btn_frame, text="Attempt Repair", fg_color="#2CC985",
+                          hover_color="#209F69", command=self.on_repair).pack(side="right", padx=10)
+
+    def on_repair(self):    self.callback("repair", self.mesh_dir);    self.destroy()
+    def on_visualize(self): self.callback("visualize", self.mesh_dir); self.destroy()
     def on_cancel(self):    self.destroy()
 
 
@@ -466,30 +514,33 @@ class HRTFProjectManager(ctk.CTk):
         self.lbl_workflow.grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
         # WORKFLOW BUTTONS
-        self.btn_align = ctk.CTkButton(self.frame_actions, text="1. Align & Inspect", command=self.run_alignment)
+        self.btn_align = ctk.CTkButton(self.frame_actions, text="1. Align Mesh", command=self.run_alignment)
         self.btn_align.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
-        
-        self.btn_process = ctk.CTkButton(self.frame_actions, text="2. Process & Grade Mesh", command=self.run_processing)
-        self.btn_process.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
-        
-        self.btn_blender = ctk.CTkButton(self.frame_actions, text="3. Open Graded Meshes in Blender (Setup Scene)", command=self.run_blender_setup)
-        self.btn_blender.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
-        self.btn_export = ctk.CTkButton(self.frame_actions, text="4. Export Project Folders (Manual/Script)", state="disabled", fg_color="gray30", text_color="gray")
-        self.btn_export.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.btn_inspect = ctk.CTkButton(self.frame_actions, text="2. Inspect & Fix Mesh", command=self.run_inspect_fix)
+        self.btn_inspect.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
-        self.btn_numcalc = ctk.CTkButton(self.frame_actions, text="5. Run NumCalc Simulation", command=self.run_numcalc)
-        self.btn_numcalc.grid(row=5, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.btn_process = ctk.CTkButton(self.frame_actions, text="3. Process & Grade Mesh", command=self.run_processing)
+        self.btn_process.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
-        self.btn_sofa = ctk.CTkButton(self.frame_actions, text="6. Generate Mastered SOFA Files", command=self.run_sofa_generation)
-        self.btn_sofa.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.btn_blender = ctk.CTkButton(self.frame_actions, text="4. Open Graded Meshes in Blender (Setup Scene)", command=self.run_blender_setup)
+        self.btn_blender.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+
+        self.btn_export = ctk.CTkButton(self.frame_actions, text="5. Export Project Folders (Manual/Script)", state="disabled", fg_color="gray30", text_color="gray")
+        self.btn_export.grid(row=5, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+
+        self.btn_numcalc = ctk.CTkButton(self.frame_actions, text="6. Run NumCalc Simulation", command=self.run_numcalc)
+        self.btn_numcalc.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+
+        self.btn_sofa = ctk.CTkButton(self.frame_actions, text="7. Generate Mastered SOFA Files", command=self.run_sofa_generation)
+        self.btn_sofa.grid(row=7, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
 
         # EXTRAS SECTION
         self.lbl_extras_spacer = ctk.CTkLabel(self.frame_actions, text="EXTRAS", font=("Roboto Medium", 12))
-        self.lbl_extras_spacer.grid(row=7, column=0, columnspan=2, pady=(10, 0))
+        self.lbl_extras_spacer.grid(row=8, column=0, columnspan=2, pady=(10, 0))
 
         self.frame_extras = ctk.CTkFrame(self.frame_actions, fg_color="transparent")
-        self.frame_extras.grid(row=8, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.frame_extras.grid(row=9, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
         self.frame_extras.grid_columnconfigure(0, weight=1)
         self.frame_extras.grid_columnconfigure(1, weight=1)
 
@@ -501,12 +552,12 @@ class HRTFProjectManager(ctk.CTk):
 
         # LOGGING AREA
         self.textbox = ctk.CTkTextbox(self.frame_actions, height=150)
-        self.textbox.grid(row=9, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
-        
-        self.btn_stop = ctk.CTkButton(self.frame_actions, text="STOP PROCESS", fg_color=COLOR_ERROR, state="disabled", command=self.kill_process)
-        self.btn_stop.grid(row=10, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.textbox.grid(row=10, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
 
-        self.frame_actions.grid_rowconfigure(9, weight=1)
+        self.btn_stop = ctk.CTkButton(self.frame_actions, text="STOP PROCESS", fg_color=COLOR_ERROR, state="disabled", command=self.kill_process)
+        self.btn_stop.grid(row=11, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+
+        self.frame_actions.grid_rowconfigure(10, weight=1)
         self.frame_actions.grid_columnconfigure(0, weight=1)
 
     def add_config_row(self, row, label_text, attr_name, placeholder, browse_cmd=None, parent_frame=None):
@@ -605,6 +656,9 @@ class HRTFProjectManager(ctk.CTk):
                     if getattr(self, '_pending_mesh_check', False):
                         self._pending_mesh_check = False
                         self.after(200, self._check_mesh_quality_result)
+                    if getattr(self, '_pending_inspect_check', False):
+                        self._pending_inspect_check = False
+                        self.after(200, self._check_aligned_quality_result)
                 else:
                     self.log(msg, timestamp=False)
         except queue.Empty:
@@ -712,11 +766,7 @@ class HRTFProjectManager(ctk.CTk):
         return "Project"
 
     def get_mesh_dir(self):
-        base_path = self.entry_base.get()
-        meshes_path = os.path.join(base_path, "Meshes")
-        if os.path.exists(meshes_path):
-            return meshes_path
-        return base_path
+        return ProjectStore(self.entry_base.get()).mesh_dir
 
     def _rel_to_base(self, abs_path, base):
         """Convert abs_path to a path relative to base, if it's under base."""
@@ -962,25 +1012,25 @@ class HRTFProjectManager(ctk.CTk):
         path = filedialog.askopenfilename(filetypes=[("JSON Project", "*.json")])
         if not path: return
         try:
-            with open(path, 'r') as f:
-                data = json.load(f)
-                self.project_data.update(data)
-                # Cleanup old keys if they exist in a legacy project.json
-                for k in ["mesh2hrtf_path", "blender_path", "grading_bin_path"]:
-                    if k in self.project_data:
-                        del self.project_data[k]
+            base = os.path.dirname(os.path.abspath(path))
+            data = ProjectStore(base).load_project()
+            self.project_data.update(data)
+            # Cleanup old keys if they exist in a legacy project.json
+            for k in ["mesh2hrtf_path", "blender_path", "grading_bin_path"]:
+                if k in self.project_data:
+                    del self.project_data[k]
 
-                if "project_resolution" not in self.project_data:
-                    self.project_data["project_resolution"] = "standard"
+            if "project_resolution" not in self.project_data:
+                self.project_data["project_resolution"] = "standard"
 
-                # base_path is authoritative from the file's own location, so the
-                # project folder can be moved/renamed without breaking anything.
-                self.project_data["base_path"] = os.path.dirname(os.path.abspath(path))
+            # base_path is authoritative from the file's own location, so the
+            # project folder can be moved/renamed without breaking anything.
+            self.project_data["base_path"] = base
 
-                self.update_ui_from_data()
-                self.log(f"Loaded project: {path} ({self.project_data['project_resolution']})")
-                # Self-heal: write the corrected base_path back to disk immediately.
-                self.save_project_json(silent=True)
+            self.update_ui_from_data()
+            self.log(f"Loaded project: {path} ({self.project_data['project_resolution']})")
+            # Self-heal: write the corrected base_path back to disk immediately.
+            self.save_project_json(silent=True)
         except Exception as e:
             self.log(f"Error loading project: {e}")
 
@@ -996,12 +1046,11 @@ class HRTFProjectManager(ctk.CTk):
         })
         if not os.path.exists(self.project_data["base_path"]):
             return
-            
-        json_path = os.path.join(self.project_data["base_path"], "project.json")
+
+        store = ProjectStore(self.project_data["base_path"])
         try:
-            with open(json_path, 'w') as f:
-                json.dump(self.project_data, f, indent=4)
-            if not silent: self.log(f"Settings saved to {json_path}")
+            store.write_project(self.project_data)
+            if not silent: self.log(f"Settings saved to {store.project_json_path}")
         except Exception as e:
             if not silent: self.log(f"Error saving: {e}")
 
@@ -1012,31 +1061,91 @@ class HRTFProjectManager(ctk.CTk):
 
     # --- MESH QUALITY HELPERS ---
 
+    def _watch_viewer(self, proc, on_close):
+        """Poll a detached viewer subprocess every second; call on_close() when
+        it exits so the GUI picks up any mesh/check-file changes it made.
+        Uses `after()` — no threads, no is_running block."""
+        if proc.poll() is None:
+            self.after(1000, lambda: self._watch_viewer(proc, on_close))
+        else:
+            on_close()
+
+    def _store(self, mesh_path=None):
+        """ProjectStore anchored at the current project; mesh_path pins the mesh
+        dir for callers that already resolved it via get_mesh_dir()."""
+        return ProjectStore(self.entry_base.get(), mesh_dir=mesh_path)
+
     def _mesh_check_passed(self, mesh_path):
         """Return True if mesh_check.json is absent (backward compat) or has no critical severity."""
-        p = os.path.join(mesh_path, "mesh_check.json")
-        if not os.path.exists(p):
-            return True
-        try:
-            with open(p) as f:
-                data = json.load(f)
-            return not any(v.get("severity") == "critical" for v in data.values())
-        except Exception:
-            return True
+        return self._store(mesh_path).read_check(MESH_GRADED) != CleanState.CRITICAL
+
+    def _aligned_check_passed(self, mesh_path):
+        """True if aligned_check.json is present and has no critical severity.
+        Absent => not yet inspected => the Inspect & Fix step is not complete."""
+        return self._store(mesh_path).read_check(MESH_ALIGNED) == CleanState.CLEAN
+
+    @staticmethod
+    def _counts_tunnel_only(counts):
+        """True if genus>0 is the only thing making the mesh critical."""
+        genus = counts.get("genus", 0) or 0
+        vol = counts.get("volume")
+        other_critical = (
+            (counts.get("holes", 0) or 0) > 0
+            or (counts.get("boundary_edges", 0) or 0) > 0
+            or (counts.get("non_manifold_edges", 0) or 0) > 0
+            or (counts.get("non_manifold_verts", 0) or 0) > 0
+            or (counts.get("si_faces", 0) or 0) > 0
+            or (counts.get("components", 0) or 0) > 1
+            or (vol is not None and vol < 0)
+        )
+        return genus > 0 and not other_critical
+
+    def _check_aligned_quality_result(self):
+        """Called after an inspect_aligned / repair_aligned run, or when the
+        detached tunnel viewer closes — shows AlignedMeshDialog if the aligned
+        mesh still has critical issues, or restyles the Inspect button to 'done'
+        if the check now passes."""
+        mesh_dir = self.get_mesh_dir()
+        store = self._store(mesh_dir)
+        state = store.read_check(MESH_ALIGNED)
+        if state == CleanState.NOT_RUN:
+            return
+        # Always refresh workflow buttons so the Inspect step's styling reflects
+        # the current check result (covers the viewer-close "ok" path too).
+        self.update_workflow_state()
+        if state != CleanState.CRITICAL:
+            self.log("[OK] Aligned mesh passed inspection — you may proceed to grading.")
+            return
+        info = store.read_check_data(MESH_ALIGNED).get("aligned", {})
+        counts = info.get("counts", {})
+        tunnel_only = self._counts_tunnel_only(counts)
+        summary = "\n".join(f"  {k}: {v}" for k, v in counts.items() if v not in (0, None))
+        AlignedMeshDialog(self, mesh_dir, summary, tunnel_only, self._on_aligned_quality_action)
+
+    def _on_aligned_quality_action(self, action, mesh_dir):
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+
+        if action == "repair":
+            self.log("--> Attempting mesh repair on aligned mesh (pymeshfix)...")
+            self._pending_inspect_check = True
+            cmd = [sys.executable, "-u", inspector, "repair_aligned", mesh_dir]
+            self.run_external_command(cmd)
+
+        elif action == "visualize":
+            viewer = os.path.join(scripts_dir, "mesh_problem_viewer.py")
+            ply = os.path.join(mesh_dir, "aligned_head.ply")
+            if os.path.exists(ply):
+                self.log("--> Opening tunnel viewer. Apply Cut & Cap inside, then "
+                         "close the viewer — the project will refresh automatically.")
+                proc = subprocess.Popen([sys.executable, viewer, ply],
+                                        creationflags=CREATE_NO_WINDOW)
+                self._watch_viewer(proc, self._check_aligned_quality_result)
 
     def _check_mesh_quality_result(self):
         """Called after a process_and_grade run — shows MeshQualityDialog if criticals found."""
         mesh_path = self.get_mesh_dir()
-        check_path = os.path.join(mesh_path, "mesh_check.json")
-        if not os.path.exists(check_path):
-            return
-        try:
-            with open(check_path) as f:
-                data = json.load(f)
-        except Exception:
-            return
-        has_critical = any(v.get("severity") == "critical" for v in data.values())
-        if has_critical:
+        if self._store(mesh_path).read_check(MESH_GRADED) == CleanState.CRITICAL:
             MeshQualityDialog(self, mesh_path, self._on_mesh_quality_action)
 
     def _on_mesh_quality_action(self, action, mesh_path):
@@ -1051,16 +1160,18 @@ class HRTFProjectManager(ctk.CTk):
 
         elif action == "visualize":
             viewer = os.path.join(scripts_dir, "mesh_problem_viewer.py")
-            check_path = os.path.join(mesh_path, "mesh_check.json")
             try:
-                with open(check_path) as f:
-                    data = json.load(f)
+                data = self._store(mesh_path).read_check_data(MESH_GRADED) or {}
                 for side, side_data in data.items():
                     if side_data.get("severity") == "critical":
                         ply = os.path.join(mesh_path, f"{side.capitalize()}_Graded.ply")
                         if os.path.exists(ply):
-                            subprocess.Popen([sys.executable, viewer, ply],
-                                             creationflags=CREATE_NO_WINDOW)
+                            proc = subprocess.Popen([sys.executable, viewer, ply],
+                                                    creationflags=CREATE_NO_WINDOW)
+                            def _on_close_graded():
+                                self.update_workflow_state()
+                                self._check_mesh_quality_result()
+                            self._watch_viewer(proc, _on_close_graded)
             except Exception as e:
                 self.log(f"[!] Could not launch viewer: {e}")
 
@@ -1077,32 +1188,37 @@ class HRTFProjectManager(ctk.CTk):
 
         mesh_path = self.get_mesh_dir()
         
-        step1_done = os.path.exists(os.path.join(mesh_path, "aligned_head.ply"))
-        step2_done = (step1_done
-                      and os.path.exists(os.path.join(mesh_path, "Left_Graded.ply"))
-                      and self._mesh_check_passed(mesh_path))
-        
-        blend_file = os.path.join(base_path, f"{proj_name}.blend")
-        step3_done = step2_done and os.path.exists(blend_file)
-        
-        step4_done = step3_done and os.path.exists(os.path.join(base_path, "Exports", "Left_Project"))
-        
-        nc_log_left = os.path.join(base_path, "Exports", "Left_Project", "NumCalc", "source_1", "NC.out")
-        step5_done = step4_done and os.path.exists(nc_log_left)
-        
-        output_dir = os.path.join(base_path, "Output")
-        step6_done = step5_done and os.path.exists(output_dir) and any(f.endswith(".sofa") for f in os.listdir(output_dir))
+        step_align_done = os.path.exists(os.path.join(mesh_path, "aligned_head.ply"))
+        # Inspect & Fix is OPTIONAL: it does not gate grading (grading just uses
+        # whatever aligned_head.ply currently is). step_inspect_done only drives
+        # the Inspect button's own "done" styling.
+        step_inspect_done = step_align_done and self._aligned_check_passed(mesh_path)
+        step_grade_done = (step_align_done
+                           and os.path.exists(os.path.join(mesh_path, "Left_Graded.ply"))
+                           and self._mesh_check_passed(mesh_path))
 
+        blend_file = os.path.join(base_path, f"{proj_name}.blend")
+        step_blender_done = step_grade_done and os.path.exists(blend_file)
+
+        step_export_done = step_blender_done and os.path.exists(os.path.join(base_path, "Exports", "Left_Project"))
+
+        nc_log_left = os.path.join(base_path, "Exports", "Left_Project", "NumCalc", "source_1", "NC.out")
+        step_numcalc_done = step_export_done and os.path.exists(nc_log_left)
+
+        output_dir = os.path.join(base_path, "Output")
+        step_sofa_done = step_numcalc_done and os.path.exists(output_dir) and any(f.endswith(".sofa") for f in os.listdir(output_dir))
+
+        # Linear progress for the MAIN path (Inspect is off this path).
         progress_index = 0
-        if step1_done: progress_index = 1
-        if step2_done: progress_index = 2
-        if step3_done: progress_index = 3
-        if step4_done: progress_index = 4
-        if step5_done: progress_index = 5
-        if step6_done: progress_index = 6
-        
+        if step_align_done: progress_index = 1
+        if step_grade_done: progress_index = 2
+        if step_blender_done: progress_index = 3
+        if step_export_done: progress_index = 4
+        if step_numcalc_done: progress_index = 5
+        if step_sofa_done: progress_index = 6
+
         self.project_data["progress"] = progress_index
-        
+
         def set_btn(btn, state_idx):
             if state_idx < progress_index:
                 btn.configure(state="normal", fg_color=COLOR_DONE, hover_color=HOVER_DONE, text_color="white")
@@ -1114,10 +1230,20 @@ class HRTFProjectManager(ctk.CTk):
         set_btn(self.btn_align, 0)
         set_btn(self.btn_process, 1)
         set_btn(self.btn_blender, 2)
-        set_btn(self.btn_numcalc, 4) 
+        set_btn(self.btn_numcalc, 4)
         set_btn(self.btn_sofa, 5)
-        
-        if step6_done:
+
+        # Inspect & Fix: optional side-step. Available once align is done; shows
+        # "done" styling once the aligned mesh passes inspection, but it never
+        # blocks Process & Grade.
+        if not step_align_done:
+            self.btn_inspect.configure(state="disabled", fg_color=COLOR_LOCKED, text_color="grey")
+        elif step_inspect_done:
+            self.btn_inspect.configure(state="normal", fg_color=COLOR_DONE, hover_color=HOVER_DONE, text_color="white")
+        else:
+            self.btn_inspect.configure(state="normal", fg_color=COLOR_ACTIVE, hover_color=HOVER_ACTIVE, text_color="black")
+
+        if step_sofa_done:
             self.btn_extras.configure(state="normal", fg_color=COLOR_ACTIVE, text_color="black")
             self.btn_vtk.configure(state="normal", fg_color=COLOR_ACTIVE, text_color="black")
         else:
@@ -1143,22 +1269,75 @@ class HRTFProjectManager(ctk.CTk):
         # Added -u for unbuffered output
         cmd = [sys.executable, "-u", script_path, raw_mesh, output_mesh]
         self.run_external_command(cmd)
-    
+
+    def run_inspect_fix(self):
+        """Step 2: inspect the aligned mesh; on criticals show the Inspect & Fix
+        dialog (pymeshfix repair + interactive tunnel cut & cap)."""
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+        mesh_dir = self.get_mesh_dir()
+        aligned = os.path.join(mesh_dir, "aligned_head.ply")
+        if not os.path.exists(aligned):
+            return self.log("Error: Run '1. Align Mesh' first (aligned_head.ply not found).")
+        if not os.path.exists(inspector):
+            return self.log(f"Error: {inspector} missing")
+
+        self.log("--> Inspecting aligned mesh...")
+        self._pending_inspect_check = True
+        cmd = [sys.executable, "-u", inspector, "inspect_aligned", mesh_dir]
+        self.run_external_command(cmd)
+
+    def _aligned_inspection_warning(self, mesh_dir):
+        """Return a warning string if grading should warn the user (mesh never
+        inspected, or inspection found unresolved criticals), else None.
+        Inspect & Fix is optional, so this only warns -- it never blocks.
+
+        Note: a corrupt aligned_check.json folds into NOT_RUN (the "not inspected"
+        warning), which is strictly safer than the old silent pass and matches the
+        CleanState design."""
+        store = self._store(mesh_dir)
+        state = store.read_check(MESH_ALIGNED)
+        if state == CleanState.NOT_RUN:
+            return ("The aligned mesh has not been inspected (Step 2).\n"
+                    "Grading an un-inspected mesh may fail later if it has "
+                    "self-intersections or topological tunnels.")
+        if state == CleanState.CRITICAL:
+            counts = store.read_check_data(MESH_ALIGNED).get("aligned", {}).get("counts", {})
+            summary = ", ".join(f"{k}={v}" for k, v in counts.items()
+                                if v not in (0, None))
+            return ("Inspection found UNRESOLVED critical issues on the aligned "
+                    f"mesh:\n  {summary}\nGrading anyway may produce a bad result.")
+        return None
+
     # --- Updated to work with new browse_blender and brows_bins functions ---
     def run_processing(self):
-        scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(scripts_dir, "process_and_grade.py")
         mesh_dir = self.get_mesh_dir()
         aligned_mesh = os.path.join(mesh_dir, "aligned_head.ply")
+        if not os.path.exists(aligned_mesh):
+            return self.log("Error: Run '1. Align Mesh' first (aligned_head.ply not found).")
+
+        warn = self._aligned_inspection_warning(mesh_dir)
+        if warn:
+            from tkinter import messagebox
+            if not messagebox.askyesno("Proceed to grading?",
+                                       f"{warn}\n\nProceed with grading anyway?",
+                                       icon="warning", parent=self):
+                self.log("--> Grading cancelled (run Inspect & Fix first, or proceed when prompted).")
+                return
+        self._launch_processing(mesh_dir, aligned_mesh)
+
+    def _launch_processing(self, mesh_dir, aligned_mesh):
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(scripts_dir, "process_and_grade.py")
         # --- Hopefully now works on both Mac & Windows ---
         grading_exe = self.entry_bins.get()
         # Fallback: If the user manually entered a folder path, try to find the binary
         if os.path.isdir(grading_exe):
             binary_name = "hrtf_mesh_grading.exe" if sys.platform == "win32" else "hrtf_mesh_grading"
             grading_exe = os.path.join(grading_exe, binary_name)
-        
+
         if not os.path.exists(grading_exe): return self.log(f"Error: Grading binary missing at {grading_exe}")
-        
+
         self.log("--> Starting Processing & Grading...")
         self._pending_mesh_check = True
         cmd = [sys.executable, "-u", script_path, aligned_mesh, grading_exe]
@@ -1287,13 +1466,13 @@ class HRTFProjectManager(ctk.CTk):
         output_dir = os.path.join(base_folder, "Output")
         
         if not os.path.exists(output_dir):
-            return self.log("[ERROR] Output folder missing. Please run Step 6 first.")
+            return self.log("[ERROR] Output folder missing. Please run Step 7 first.")
             
         # Find all 48000Hz sofa files
         sofa_files = [f for f in os.listdir(output_dir) if f.endswith("48000Hz.sofa")]
         
         if not sofa_files:
-            return self.log("[ERROR] No 48000Hz SOFA files found. Please run Step 6 first.")
+            return self.log("[ERROR] No 48000Hz SOFA files found. Please run Step 7 first.")
             
         cmds = []
         for sf_file in sofa_files:
