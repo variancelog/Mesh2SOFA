@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.5.1 (2026-06-20)
+
+- Updated readme (it was way out of date).
+- Fixed minor bug in `tunnel_loop_extractor.py`
+
 ## v1.5.0 (2026-06-20) — Formal Mesh Import Pipeline & Tunnel-Loop Robustness
 
 Introduces a formal front-door import step (Browse → inspect → Blender sliver

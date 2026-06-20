@@ -229,6 +229,7 @@ def _remesh_selected_caps(ms, *, target_mm_base=1.5, dilate_rings=3, iterations=
     only and must never abort a successful cut.
     """
     try:
+        import pymeshlab  # noqa: PLC0415 — deferred to keep top-level import optional
         # --- dilate selection into the surrounding mesh ---
         for _ in range(dilate_rings):
             ms.apply_selection_dilatation()

@@ -1,19 +1,21 @@
 # Mesh2SOFA Orchestrator
 
-An unofficial Python-based GUI orchestrator for [Mesh2HRTF](https://github.com/Mesh2HRTF/Mesh2HRTF) that streamlines the end-to-end workflow of generating personalized HRTFs. This tool automates the process from 3D mesh alignment to numerical simulation and final SOFA file export. It requires a 3d mesh of a head to start. 
+An unofficial Python-based GUI orchestrator for [Mesh2HRTF](https://github.com/Mesh2HRTF/Mesh2HRTF) that streamlines the end-to-end workflow of generating personalized HRTFs. This tool automates the process from 3D mesh alignment to numerical simulation and final SOFA file export. It requires a 3D mesh of a head to start.
 
 > **Note:** This is an unofficial orchestrator and is not directly affiliated with the Mesh2HRTF project.
 
-![Mesh2SOFA Screenshot](screenshot_mesh2sofa.png)
+![Mesh2SOFA Screenshot](screenshot_mesh2sofa.png?v=2)
 
 ## Features
 
-* **Workflow Management:** Guided 6-step process from raw mesh to final SOFA.
+* **Workflow Management:** Guided 7-step process from raw mesh to final SOFA.
 * **Visual Interface:** User-friendly GUI built with CustomTkinter.
-* **Mesh Alignment:** GUI to easily align mesh to the Franfurt plane and fine tune rotation.
+* **Formal Mesh Import:** Browsing for a raw mesh automatically runs a cleaning pipeline — sliver removal via Blender, structural repair via pymeshfix — before the mesh enters the project.
+* **Mesh Inspection & Repair:** Dedicated step to detect and fix mesh problems (holes, non-manifold edges, self-intersections, topological tunnels). Includes an interactive 3D tunnel viewer with click-to-select cut loops and one-keypress in-app tunnel removal.
+* **Mesh Alignment:** Interactive 3D viewer for aligning the mesh to the Frankfurt plane with point picking and pitch fine-tuning.
 * **Blender Automation:** Automatically sets up scenes for mesh grading and export.
-* **Simulation Control:** Launches NumCalc simulations including "Test Mode" to proecess only highest frequencies prior to full simulation.
-* **Visual Interface:** Generate both raw and diffuse-field equalized SOFA files in both 44.1 and 48kHz.
+* **Simulation Control:** Launches NumCalc simulations including "Test Mode" to process only the highest frequencies prior to full simulation.
+* **SOFA Mastering:** Generates both raw and diffuse-field equalized SOFA files at 44.1 kHz and 48 kHz.
 * **DFHRTF:** Compute and export DFHRTF responses with optional tilt.
 * **VTK Viewer:** Export and view VTK files to observe sound pressure for each simulated frequency.
 * **Cross-Platform:** Designed to run on Windows, Mac, and Linux.
@@ -24,9 +26,9 @@ To use this orchestrator, you must have the following installed:
 
 1.  **Python 3.10+** including required packages (outlined below and in requirements.txt)
 2.  **[Mesh2HRTF](https://sourceforge.net/projects/mesh2hrtf/)** including compiled NumCalc and Mesh Grading Tool executables.
-    - NOTE: Make sure to compile NumCalc from source - the Windows binaries on mesh2HRTF-tools for Windows are outdated. 
+    - NOTE: Make sure to compile NumCalc from source - the Windows binaries on mesh2HRTF-tools for Windows are outdated.
     - NumCalc binaries should be in the `Mesh2HRTF/NumCalc/bin` folder
-3.  **[Blender](https://www.blender.org/)** (For use with Mesh2Input - 4.5 LTS recommended).
+3.  **[Blender](https://www.blender.org/)** (4.5 LTS recommended) — required for the mesh import step and for Step 4.
 4.  **Additional Python Libraries** outlined below.
 
 ## Installation
@@ -53,7 +55,7 @@ To use this orchestrator, you must have the following installed:
     * Go to **Edit > Preferences > Add-ons**.
     * Click **Install From Disk...** from the mini drop-down menu and select `blender_scripts/mesh2SOFA_blender_addon.py` from this repository.
     * Search for "Mesh2SOFA Automation" in the list and enable it by checking the box (it should be checked by default).
-    * The **Mesh2SOFA** panel will now always be available in the 3D Viewport sidebar (press 'N' to open the sidebar that contains the panel, or enable the sidebar from the "View" menu). The panel should be visible by default when running the "Open in Blender" action from Mesh2SOFA.
+    * The **Mesh2SOFA** panel will now always be available in the 3D Viewport sidebar (press 'N' to open the sidebar, or enable it from the "View" menu).
 
 ## Usage
 
@@ -64,37 +66,47 @@ To use this orchestrator, you must have the following installed:
 
 2.  **Configuration:**
     * Create a New Project or Open an existing Project.
-    * If your computer has limited RAM (e.g. 8-16GB), select the "low-res" option from the Project Settings. This will use a slightly lower res graded mesh for the simulation, and will calculate the HRTF only up to 16 kHz to save on RAM. However, it will still produce the same 44.1 and 48 kHz SOFA files in the "Generate Mastered SOFA Files" step through upsampling.
-      * NOTE: Limited RAM are encouraged to use a shoulderless/torsoless mesh to greatly reduce RAM usage on simulations.  
-    * Configure your **Project Folder** location (where your project files will be stored), Mesh2HRTF root folder (e.g. C:/Mesh2HRTF), select an **Evaluation Grid** (recommended to stick with "Default"), **Blender Exe** (so Mesh2SOFA knows where Blender is on your computer in Step 3), and the **Mesh Grading Tool** binaries (e.g. mesh-hrtf-tools/hrtf_mesh_grading_WindowsExe/bin on Windows).
+    * If your computer has limited RAM (e.g. 8-16GB), select the "Lowres" option from the Project Settings. This will use a slightly lower resolution graded mesh and calculate the HRTF only up to 16 kHz to save on RAM, but will still produce 44.1 kHz and 48 kHz SOFA files through upsampling.
+      * NOTE: Limited RAM users are encouraged to use a shoulderless/torsoless mesh to greatly reduce RAM usage during simulation.
+    * Under **App Settings**, configure your Mesh2HRTF root folder, **Blender executable** path (required — used both for mesh import and Step 4), and the **Mesh Grading Tool** binary.
+    * Under **Project Settings**, select your **Evaluation Grid(s)** and resolution mode.
 
 3.  **Workflow:**
-    * **New Project:** Create a structured folder for your simulation.
-    * **Select Raw Mesh** is where you specify which 3d head scan (`.obj` or `.ply`) you want to use, and whether you want to Move or Copy this mesh to your Project Folder for future processing. In either case, the original mesh is always left intact.
-    * **1. Align Head** opens an interactive 3D viewer. In Phase 1, you will be prompted to pick three points on your mesh: Left Ear, Right Ear, and Nose Bridge. In Phase 2, you can use a slider to fine-tune the pitch (tilt) of the head to ensure it is level.
-    * **2. Process & Grade** first uses PyMeshLab to optimize your mesh for the grading step based on your selected Project resolution (Standard or Low-Res), then uses the Mesh Grading tool to create optimized left and right side meshes recommended for NumCalc processing. 
-    * **3. Open in Blender** opens a reference Blender file that contains the meshes and materials needed for generating the project folders used by NumCalc.
-    * **4. Setup and Export in Blender** is where you use the Mesh2SOFA panel in Blender to assign materials and export the project files (details below). 
-    * **5: Run NumCalc Simulation** Runs multiple instances of NumCalc against your project folders. This step is VERY compute and memory instensive. On a normal home computer, this can take anywhere from 8 to 24 hours. It is recommended to run this on as powerful a computer as possible. You can stop the simulation with the "STOP PROCESS" button; it will stop the processes but not delete the simulation output, so you can pick up where you left off.
-    * **6. Generate Mastered SOFA Files** Generates multiple versions of the SOFA files that can be used with binaural rendering plugins such as SPARTA Binauraliser and APL Viruoso. Four versions are generated: diffuse-field equalized and non-diffused field equalized, both in 44.1 kHz and 48 kHz samplerates. Either version can be used with SPARTA (it has a built in optional "Apply Diffuse-Field EQ" setting), but Virtuoso and some other binaural renderers expect an already diffuse field equalized SOFA.
+
+    * **Browse for Raw Mesh** is the entry point for your 3D head scan (`.obj` or `.ply`). Clicking Browse prompts you to Move or Copy the file into the project, then automatically runs a full cleaning pipeline: it inspects for defects, removes tiny sliver triangles via Blender, and repairs structural issues with pymeshfix. A popup summarises the result. If a topological tunnel is detected, you will see a warning — tunnels can only be removed after alignment in Step 2. The Raw Mesh field is read-only; Browse is the only way to set it.
+
+    * **1. Align Mesh** opens an interactive 3D viewer. In Phase 1, pick three landmarks: Left Ear, Right Ear, and Nose Tip. In Phase 2, use a slider to fine-tune the pitch (tilt) of the head to ensure it is level.
+
+    * **2. Inspect & Fix Mesh** *(optional)* runs a mesh health check on the aligned mesh and shows any detected problems: holes, non-manifold edges, self-intersections, and topological tunnels (genus > 0 "pierced-ear" artifacts that break BEM simulation). You can run an automatic pymeshfix repair pass, or launch the tunnel viewer to cut and cap tunnels interactively — click a candidate loop (green "Cut here" / red "Avoid") to select it, then press **C** to apply the cut in-app. This step is optional — grading will proceed with a warning if you skip it.
+
+    * **3. Process & Grade Mesh** uses PyMeshLab to optimize the mesh for your selected resolution (Standard or Lowres), then runs the mesh grading tool to produce optimized left and right meshes for NumCalc.
+
+    * **4. Open Graded Meshes in Blender** opens a reference Blender scene containing the graded meshes and materials. If a `.blend` already exists, you can choose to open it as-is or overwrite it with a fresh import.
+
+    * **5. Export Project Folders** is done inside Blender using the Mesh2SOFA panel (details below). This generates the `Left_Project` and `Right_Project` folders used by NumCalc.
+
+    * **6. Run NumCalc Simulation** runs multiple NumCalc instances against your project folders. This step is very compute- and memory-intensive and can take 8–24 hours on a typical home computer. Use "Test Mode" to run a stability check on the highest frequencies before committing to a full simulation. You can stop the simulation at any time with the **STOP PROCESS** button — simulation output is preserved so you can resume later.
+
+    * **7. Generate Mastered SOFA Files** produces four SOFA file variants: diffuse-field equalized and non-equalized, at both 44.1 kHz and 48 kHz. Either variant can be used with SPARTA Binauraliser (which has a built-in optional "Apply Diffuse-Field EQ" setting), while renderers such as APL Virtuoso expect pre-equalized files.
+
     * **EXTRAS:**
-      * **Generate DFHRTF Files** generates separate tilted diffuse-field responses as CSV files for left, right, and average. Frequency response plots are also generated. This step allows you to specify a tilt value (e.g. -1.0db per octave), and you can run it multiple times to produce and test different outputs. (The way to use these files is to take blocked-ear canal measurements of your headphones, and equalize or convolve them to the tilted diffuse-field response.)
-      * **Generate Paraview VTK Files** exports pressure data from your simulation into the VTK format for specific frequency ranges. You can then use the included `_vtk_viewer.py` tool (or ParaView) to interactively visualize the acoustic pressure fields around your head model.
+      * **Generate DFHRTF Files** generates tilted diffuse-field responses as CSV files for left, right, and average channels, plus frequency response plots. You can specify a tilt value (e.g. -1.0 dB/octave) and run it multiple times to test different outputs.
+      * **Generate Paraview VTK Files** exports pressure data from your simulation into VTK format for a specified frequency range. Use the included `_vtk_viewer.py` tool (or ParaView) to interactively visualize the acoustic pressure fields around the head model.
 
 ## Blender Steps
 
-Once the Blender Add-on is installed (see Installation step 4), you can use the **Mesh2SOFA** panel in the 3D Viewport sidebar to automate the workflow:
+Once the Blender Add-on is installed (see Installation step 4), use the **Mesh2SOFA** panel in the 3D Viewport sidebar to complete Step 5:
 
-1. Press **'N'** in the 3D Viewport to open the sidebar if it's not already visible (it should be visible by default after running "Open in Blender" from Mesh2SOFA).
+1. Press **'N'** in the 3D Viewport to open the sidebar if it's not already visible.
 2. Click the **Mesh2SOFA** tab.
-3. **Step 1: Assign Materials.** Click the `Assign Materials` button. This will automatically:
+3. **Step 1: Assign Materials.** Click `Assign Materials`. This will:
    - Create the necessary `Skin`, `Left Ear`, and `Right Ear` materials.
-   - Assign the `Skin` material to the `Left_Graded` and `Right_Graded` meshes.
-   - Automatically find the ear openings and assign the correct ear materials to the single closest face on each mesh.
-   - NOTE: double check that the left and right ear materials are applied to the correct locations (success here depends on the position of the ear canal entrance relative to the tragus shape/size.)
-4. **Step 2: Export Projects.** Click the `Export Projects` button. This will generate the two project folders needed by NumCalc in your project's `Exports` folder.
+   - Assign `Skin` to the `Left_Graded` and `Right_Graded` meshes.
+   - Automatically find the ear openings and assign the correct ear material to the closest face on each side.
+   - NOTE: double-check that the left and right ear materials are applied to the correct locations (success depends on the position of the ear canal entrance relative to the tragus shape/size).
+4. **Step 2: Export Projects.** Click `Export Projects`. This generates the two project folders needed by NumCalc in your project's `Exports` folder.
 
-If there are any errors or missing output in the `Exports` folder, check the Blender system console for more details. common issues include the `Left_Graded` or `Right_Graded` meshes being missing from the scene.
+If there are errors or missing output in the `Exports` folder, check the Blender system console for details. Common issues include `Left_Graded` or `Right_Graded` meshes missing from the scene.
 
 ## License
 
