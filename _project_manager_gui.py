@@ -504,7 +504,11 @@ class HRTFProjectManager(ctk.CTk):
         self.btn_select_grids = ctk.CTkButton(tab_proj, text="Select Grids", width=80, command=self.open_grid_dialog)
         self.btn_select_grids.grid(row=1, column=2, padx=10, pady=5)
 
-        self.add_config_row(2, "Raw Mesh:", "entry_raw", "Select Raw Mesh (.obj/.ply)...", browse_cmd=self.browse_raw, parent_frame=tab_proj)
+        self.add_config_row(2, "Raw Mesh:", "entry_raw", "Browse to import a raw mesh (.obj/.ply/.stl)...", browse_cmd=self.browse_raw, parent_frame=tab_proj)
+        # Read-only: the only way to set a raw mesh is via Browse → import.
+        # Freetyping does nothing (the field is only ever read, never triggers
+        # import), and now disabling the field makes that explicit.
+        self.entry_raw.configure(state="disabled")
 
         # --- SECTION 2: WORKFLOW ACTIONS ---
         self.frame_actions = ctk.CTkFrame(self)
@@ -659,6 +663,9 @@ class HRTFProjectManager(ctk.CTk):
                     if getattr(self, '_pending_inspect_check', False):
                         self._pending_inspect_check = False
                         self.after(200, self._check_aligned_quality_result)
+                    if getattr(self, '_pending_import_check', False):
+                        self._pending_import_check = False
+                        self.after(200, self._check_import_result)
                 else:
                     self.log(msg, timestamp=False)
         except queue.Empty:
@@ -754,7 +761,7 @@ class HRTFProjectManager(ctk.CTk):
         self.log(f"Project created at: {target_dir}")
         self.entry_base.delete(0, "end")
         self.entry_base.insert(0, target_dir)
-        self.entry_raw.delete(0, "end")
+        self._set_entry_raw()
         
         self.save_project_json(silent=True)
         self.update_workflow_state()
@@ -767,6 +774,14 @@ class HRTFProjectManager(ctk.CTk):
 
     def get_mesh_dir(self):
         return ProjectStore(self.entry_base.get()).mesh_dir
+
+    def _set_entry_raw(self, value=""):
+        """Write to the read-only Raw Mesh field (briefly enable → set → disable)."""
+        self.entry_raw.configure(state="normal")
+        self.entry_raw.delete(0, "end")
+        if value:
+            self.entry_raw.insert(0, value)
+        self.entry_raw.configure(state="disabled")
 
     def _rel_to_base(self, abs_path, base):
         """Convert abs_path to a path relative to base, if it's under base."""
@@ -907,13 +922,23 @@ class HRTFProjectManager(ctk.CTk):
             self.entry_blender.insert(0, path)
             self.save_project_json()
 
-    # --- Smart move raw mesh to Meshes folder ---
+    # --- Formal mesh import: Browse → Move/Copy → inspect+dissolve+repair ---
     def browse_raw(self):
-        # 1. Check if project is valid first
+        # 1. Check project folder
         if not self.entry_base.get():
             return messagebox.showerror("Error", "Please define a Project Folder first.")
 
-        # 2. Open File Dialog
+        # 2. Hard-require Blender (sliver dissolve only works via Blender).
+        blender_exe = self.entry_blender.get()
+        if not blender_exe or not os.path.exists(blender_exe):
+            return messagebox.showerror(
+                "Blender Required",
+                "A valid Blender path must be set in App Settings before importing a mesh.\n\n"
+                "Blender is required to remove tiny sliver triangles that pymeshlab\n"
+                "cannot fix. Please configure 'Blender Executable' above and try again.",
+            )
+
+        # 3. Open file dialog
         kwargs = {"filetypes": [("3D Mesh", "*.obj *.ply *.stl")]}
         current_path = self.entry_raw.get()
         base_path = self.entry_base.get()
@@ -921,37 +946,47 @@ class HRTFProjectManager(ctk.CTk):
             kwargs["initialdir"] = os.path.dirname(current_path)
         elif base_path and os.path.isdir(base_path):
             kwargs["initialdir"] = base_path
-            
+
         src_path = filedialog.askopenfilename(**kwargs)
-        if not src_path: 
+        if not src_path:
             return
 
-        # 3. Determine Paths
+        # 4. Determine destination in Meshes/
         project_mesh_dir = self.get_mesh_dir()
         if not os.path.exists(project_mesh_dir):
             os.makedirs(project_mesh_dir, exist_ok=True)
 
-        src_dir = os.path.dirname(os.path.normpath(src_path))
+        src_dir  = os.path.dirname(os.path.normpath(src_path))
         dest_dir = os.path.normpath(project_mesh_dir)
         filename = os.path.basename(src_path)
         dest_path = os.path.join(dest_dir, filename)
 
-        # 4. Helper Function to Finalize Selection
+        # 5. After the file lands in Meshes/, run the import worker.
         def finalize_selection(final_path):
-            self.entry_raw.delete(0, "end")
-            self.entry_raw.insert(0, final_path)
-            self.save_project_json(silent=True) # Save immediately per requirement
+            self._set_entry_raw(final_path)
+            self.save_project_json(silent=True)
             self.update_workflow_state()
 
-        # 5. Logic: Check location
+            # Guard: don't queue a second process if one is already running.
+            if self.is_running:
+                self.log("[!] A process is already running — import queued next time.")
+                return
+
+            scripts_dir = os.path.dirname(os.path.abspath(__file__))
+            inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+            self.log(f"--> Importing mesh: {os.path.basename(final_path)} "
+                     "(inspect → Blender dissolve → repair)...")
+            self._pending_import_check = True
+            cmd = [sys.executable, "-u", inspector, "import_mesh", final_path, blender_exe]
+            self.run_external_command(cmd)
+
+        # 6. Move/Copy or use in place
         if src_dir == dest_dir:
-            # A: Already in folder -> Just use it
             finalize_selection(src_path)
         else:
-            # B: Outside folder -> Ask User
             def on_dialog_result(action):
-                if not action: return # User cancelled
-                
+                if not action:
+                    return
                 try:
                     if action == "copy":
                         self.log(f"Copying {filename} to Meshes folder...")
@@ -959,14 +994,11 @@ class HRTFProjectManager(ctk.CTk):
                     elif action == "move":
                         self.log(f"Moving {filename} to Meshes folder...")
                         shutil.move(src_path, dest_path)
-                    
                     finalize_selection(dest_path)
-                    
                 except Exception as e:
                     self.log(f"[!] Error during {action}: {e}")
                     messagebox.showerror("File Error", str(e))
 
-            # Launch Custom Dialog
             MoveCopyDialog(self, filename, on_dialog_result)
 
     # --- STATE MANAGEMENT ---
@@ -998,7 +1030,7 @@ class HRTFProjectManager(ctk.CTk):
         self.entry_m2h.delete(0, "end"); self.entry_m2h.insert(0, app.get("mesh2hrtf_path", ""))
         self.entry_blender.delete(0, "end"); self.entry_blender.insert(0, app.get("blender_path", ""))
         self.entry_bins.delete(0, "end"); self.entry_bins.insert(0, app.get("grading_bin_path", ""))
-        self.entry_raw.delete(0, "end"); self.entry_raw.insert(0, self._abs_from_base(d.get("raw_scan", ""), d.get("base_path", "")))
+        self._set_entry_raw(self._abs_from_base(d.get("raw_scan", ""), d.get("base_path", "")))
         self.entry_grid.configure(state="normal")
         self.entry_grid.delete(0, "end")
         if d.get("eval_grid"): self.entry_grid.insert(0, d.get("eval_grid"))
@@ -1141,6 +1173,59 @@ class HRTFProjectManager(ctk.CTk):
                 proc = subprocess.Popen([sys.executable, viewer, ply],
                                         creationflags=CREATE_NO_WINDOW)
                 self._watch_viewer(proc, self._check_aligned_quality_result)
+
+    def _check_import_result(self):
+        """Called after an import_mesh run — reads import_report.json and shows
+        a summary popup. Tunnels (genus>0) show a warning; everything else that
+        was fixable is fixed before this is called."""
+        mesh_dir = self.get_mesh_dir()
+        report_path = os.path.join(mesh_dir, "import_report.json")
+        self.update_workflow_state()
+
+        if not os.path.exists(report_path):
+            self.log("[!] import_report.json not found — import may have failed. "
+                     "Check the log above for details.")
+            return
+
+        try:
+            with open(report_path) as f:
+                data = json.load(f)
+        except Exception as e:
+            self.log(f"[!] Could not read import report: {e}")
+            return
+
+        filename = data.get("filename", "mesh")
+        after    = data.get("after", {})
+        critical = after.get("critical", [])
+
+        # Separate tunnel (genus) warnings from other residual criticals.
+        tunnel_issues     = [c for c in critical
+                             if "tunnel" in c.get("issue", "").lower()
+                             or "genus" in c.get("issue", "").lower()]
+        non_tunnel_issues = [c for c in critical if c not in tunnel_issues]
+
+        base_msg = f"Mesh imported as '{filename}'."
+
+        if non_tunnel_issues:
+            # Geometry criticals survived auto-repair — unusual, surface them.
+            issues_txt = "\n".join(f"  - {c['issue']}" for c in non_tunnel_issues)
+            messagebox.showwarning(
+                "Import Complete — Issues Remain",
+                f"{base_msg}\n\nResidual critical issues after auto-repair:\n{issues_txt}\n\n"
+                "Run Step 2 (Inspect & Fix Mesh) after alignment to address these.",
+            )
+        elif tunnel_issues:
+            # Tunnels detected but not removable before alignment.
+            messagebox.showwarning(
+                "Import Complete — Tunnel Detected",
+                f"{base_msg}\n\n"
+                "A topological tunnel (genus>0) was detected — this is a scanning "
+                "artifact that cannot be removed on the raw mesh.\n\n"
+                "After running Step 1 (Align), use Step 2 (Inspect & Fix Mesh) to "
+                "locate and remove the tunnel with the interactive cut & cap tool.",
+            )
+        else:
+            messagebox.showinfo("Import Complete", base_msg)
 
     def _check_mesh_quality_result(self):
         """Called after a process_and_grade run — shows MeshQualityDialog if criticals found."""

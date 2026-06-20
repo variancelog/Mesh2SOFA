@@ -215,6 +215,50 @@ def _mesh_genus_nx(pts, faces):
     return (2 * n_comp - chi) // 2
 
 
+def _remesh_selected_caps(ms, *, target_mm_base=1.5, dilate_rings=3, iterations=3):
+    """Retessellate the currently-selected faces (the freshly-capped tunnel holes)
+    to a uniform ~target_mm_base edge length.
+
+    Selection is first dilated by dilate_rings rings so the remesh covers a
+    transition band into the surrounding mesh and catches sub-mm slivers that sit
+    just outside the literal cap rim.  Designed to run between meshing_close_holes
+    (with newfaceselected=True) and the Taubin smooth step.
+
+    Silently no-ops on any PyMeshLab failure: the cut+cap is already
+    topologically valid at this point; retessellation is a quality improvement
+    only and must never abort a successful cut.
+    """
+    try:
+        # --- dilate selection into the surrounding mesh ---
+        for _ in range(dilate_rings):
+            ms.apply_selection_dilatation()
+
+        # --- target edge length as a percentage of the bounding-box diagonal ---
+        bbox = ms.current_mesh().bounding_box()
+        diag = bbox.diagonal()
+        if diag <= 0:
+            return
+        # Unit detection: head meshes are ~250 mm; meter-scale meshes are ~0.25
+        target = target_mm_base if diag > 5.0 else target_mm_base / 1000.0
+        target_pct = (target / diag) * 100.0
+
+        # Version-safe percentage wrapper (PercentageValue in recent pymeshlab,
+        # Percentage in older builds, raw float as last resort)
+        if hasattr(pymeshlab, 'PercentageValue'):
+            targetlen = pymeshlab.PercentageValue(target_pct)
+        elif hasattr(pymeshlab, 'Percentage'):
+            targetlen = pymeshlab.Percentage(target_pct)
+        else:
+            targetlen = target_pct
+
+        ms.apply_filter('meshing_isotropic_explicit_remeshing',
+                        iterations=iterations,
+                        targetlen=targetlen,
+                        selectedonly=True)
+    except Exception:
+        pass  # remesh failed -- leave the cap as-is; cut is still valid
+
+
 def _smooth_patches(pre_pts, keep_faces, new_pts, new_faces,
                     *, iters, ring, lam, mu):
     """Taubin-smooth the capped holes and a thin halo.
@@ -274,8 +318,8 @@ def _smooth_patches(pre_pts, keep_faces, new_pts, new_faces,
 
 
 def cut_and_cap(pts, faces, loop_verts, *, maxholesize=2000,
-                smooth_iters=3, smooth_ring=2,
-                taubin_lambda=0.5, taubin_mu=-0.53):
+                smooth_iters=5, smooth_ring=2,
+                taubin_lambda=0.4, taubin_mu=.2):
     """
     Delete the 1-ring band of faces touching loop_verts and cap the two resulting
     holes, producing a watertight surface with genus reduced by one.
@@ -286,11 +330,12 @@ def cut_and_cap(pts, faces, loop_verts, *, maxholesize=2000,
     (genus drops, two holes open, one component) and (b) come out watertight with
     genus exactly one lower after capping.
 
-    Capping uses PyMeshLab's meshing_close_holes (the same filter the repair chain
-    uses). After a clean pymeshfix repair the only boundaries are the two we just
-    created, so a generous maxholesize closes them without touching anything else.
+    Capping uses pymeshfix which produces cleaner fills than meshing_close_holes.
+    maxholesize is kept for API compatibility but unused (pymeshfix fills all holes).
     """
     import pymeshlab
+    import pymeshfix
+    from scipy.spatial import cKDTree
 
     pts = np.asarray(pts, dtype=np.float64)
     faces = np.asarray(faces)
@@ -311,14 +356,33 @@ def cut_and_cap(pts, faces, loop_verts, *, maxholesize=2000,
     keep = np.asarray([tri for tri in faces
                        if not (loop_set & {int(tri[0]), int(tri[1]), int(tri[2])})])
 
-    # cap the two holes with PyMeshLab
+    # record hole-rim coords before filling (used to re-select cap faces after)
+    _ec = {}
+    for _tri in keep:
+        for _a, _b in ((int(_tri[0]), int(_tri[1])), (int(_tri[1]), int(_tri[2])),
+                       (int(_tri[0]), int(_tri[2]))):
+            _k = (min(_a, _b), max(_a, _b))
+            _ec[_k] = _ec.get(_k, 0) + 1
+    _rim = sorted({_v for (_a, _b), _c in _ec.items() if _c == 1 for _v in (_a, _b)})
+    bv_coords = pts[_rim]
+
+    # cap the two holes with pymeshfix
+    mf = pymeshfix.MeshFix(pts, keep)
+    mf.repair()
+    new_pts = np.asarray(mf.points, dtype=np.float64)
+    new_faces = np.asarray(mf.faces, dtype=np.int64)
+
+    # select cap faces (faces touching the rim) for selective remeshing:
+    # tag rim verts via scalar quality, transfer selection to faces, then dilate+remesh
+    _q = np.zeros(len(new_pts), dtype=np.float64)
+    _, _rim_new = cKDTree(new_pts).query(bv_coords, k=1)
+    for _i in _rim_new:
+        _q[int(_i)] = 1.0
     ms = pymeshlab.MeshSet()
-    ms.add_mesh(pymeshlab.Mesh(pts, keep))
-    try:
-        ms.apply_filter('meshing_remove_unreferenced_vertices')
-    except Exception:
-        pass
-    ms.apply_filter('meshing_close_holes', maxholesize=int(maxholesize))
+    ms.add_mesh(pymeshlab.Mesh(new_pts, new_faces, v_scalar_array=_q))
+    ms.compute_selection_by_scalar_per_vertex(minq=0.5, maxq=1.5)
+    ms.compute_selection_transfer_vertex_to_face(inclusive=False)
+    _remesh_selected_caps(ms, target_mm_base=1.5)
     cm = ms.current_mesh()
     new_pts = np.asarray(cm.vertex_matrix(), dtype=np.float64)
     new_faces = np.asarray(cm.face_matrix(), dtype=np.int64)
@@ -328,7 +392,7 @@ def cut_and_cap(pts, faces, loop_verts, *, maxholesize=2000,
     if g_after != g0 - 1:
         raise ValueError(
             f"cut_and_cap: capped genus {g_after} != expected {g0 - 1} "
-            "(holes may be too large for maxholesize, or the cap re-introduced a handle)")
+            "(pymeshfix cap re-introduced a handle, or try a different loop)")
 
     if smooth_iters > 0:
         new_pts = _smooth_patches(pts, keep, new_pts, new_faces,
@@ -338,8 +402,8 @@ def cut_and_cap(pts, faces, loop_verts, *, maxholesize=2000,
 
 
 def cut_and_cap_loops(pts, faces, loops, *, maxholesize=2000,
-                      smooth_iters=3, smooth_ring=2,
-                      taubin_lambda=0.5, taubin_mu=-0.53):
+                      smooth_iters=5, smooth_ring=2,
+                      taubin_lambda=0.4, taubin_mu=0.2):
     """
     Apply cut_and_cap to SEVERAL chosen loops in one pass: delete every loop's
     1-ring band, then cap all resulting holes, reducing genus by len(loops).
@@ -354,6 +418,8 @@ def cut_and_cap_loops(pts, faces, loops, *, maxholesize=2000,
     severing check).
     """
     import pymeshlab
+    import pymeshfix
+    from scipy.spatial import cKDTree
 
     pts = np.asarray(pts, dtype=np.float64)
     faces = np.asarray(faces)
@@ -371,13 +437,32 @@ def cut_and_cap_loops(pts, faces, loops, *, maxholesize=2000,
     if keep.size == 0:
         raise ValueError("cut_and_cap_loops: deleting the loop bands removed all faces")
 
+    # record hole-rim coords before filling (used to re-select cap faces after)
+    _ec = {}
+    for _tri in keep:
+        for _a, _b in ((int(_tri[0]), int(_tri[1])), (int(_tri[1]), int(_tri[2])),
+                       (int(_tri[0]), int(_tri[2]))):
+            _k = (min(_a, _b), max(_a, _b))
+            _ec[_k] = _ec.get(_k, 0) + 1
+    _rim = sorted({_v for (_a, _b), _c in _ec.items() if _c == 1 for _v in (_a, _b)})
+    bv_coords = pts[_rim]
+
+    # cap the holes with pymeshfix
+    mf = pymeshfix.MeshFix(pts, keep)
+    mf.repair()
+    new_pts = np.asarray(mf.points, dtype=np.float64)
+    new_faces = np.asarray(mf.faces, dtype=np.int64)
+
+    # select cap faces (faces touching the rim) for selective remeshing
+    _q = np.zeros(len(new_pts), dtype=np.float64)
+    _, _rim_new = cKDTree(new_pts).query(bv_coords, k=1)
+    for _i in _rim_new:
+        _q[int(_i)] = 1.0
     ms = pymeshlab.MeshSet()
-    ms.add_mesh(pymeshlab.Mesh(pts, keep))
-    try:
-        ms.apply_filter('meshing_remove_unreferenced_vertices')
-    except Exception:
-        pass
-    ms.apply_filter('meshing_close_holes', maxholesize=int(maxholesize))
+    ms.add_mesh(pymeshlab.Mesh(new_pts, new_faces, v_scalar_array=_q))
+    ms.compute_selection_by_scalar_per_vertex(minq=0.5, maxq=1.5)
+    ms.compute_selection_transfer_vertex_to_face(inclusive=False)
+    _remesh_selected_caps(ms, target_mm_base=1.5)
     cm = ms.current_mesh()
     new_pts = np.asarray(cm.vertex_matrix(), dtype=np.float64)
     new_faces = np.asarray(cm.face_matrix(), dtype=np.int64)

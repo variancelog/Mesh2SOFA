@@ -51,7 +51,8 @@ from tunnel_loop_extractor import (
 # ---------------------------------------------------------------------------
 # LOCATE + TIGHTEN  (the reliable part)
 # ---------------------------------------------------------------------------
-def locate_cut_loops(pts, faces, genus, *, max_loops=5, progress_cb=None):
+def locate_cut_loops(pts, faces, genus, *, max_loops=5, progress_cb=None,
+                     with_loose=False):
     """
     Return a list of tight, severing cut loops (one per handle), each an
     ordered ndarray of vertex indices. Does NOT modify the mesh.
@@ -63,6 +64,12 @@ def locate_cut_loops(pts, faces, genus, *, max_loops=5, progress_cb=None):
 
     progress_cb(msg) is an optional callable for status updates (used by the
     viewer's worker thread); it must be safe to call from a background thread.
+
+    with_loose=True: return a list of (tight, loose) tuples instead of bare
+    tight loops. `loose` is the unshortened tree-cotree generator used as the
+    progenitor — callers can use it as a fallback when the tight loop is too
+    small for dual-loop generation (e.g. degenerate 3-4 vertex rings produced
+    by heavily-cleaned meshes). Default False preserves the original signature.
     """
     def _emit(msg):
         if progress_cb is not None:
@@ -102,7 +109,7 @@ def locate_cut_loops(pts, faces, genus, *, max_loops=5, progress_cb=None):
         c = pts[tight].mean(axis=0)
         if any(np.linalg.norm(c - fc) < _loop_len(pts, tight) for fc in centroids):
             continue
-        loops.append(tight)
+        loops.append((tight, loose) if with_loose else tight)
         centroids.append(c)
         if len(loops) >= want:
             break
@@ -157,16 +164,22 @@ def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5, progress_c
     """For each handle, return the dual loop pair labelled cut vs avoid.
 
     Pipeline:
-      1. locate_cut_loops -> loop A (one tight severing loop per handle).
+      1. locate_cut_loops -> loop A (one tight severing loop per handle), plus
+         the loose progenitor used to generate it.
       2. dual_crossing_loop(A) -> loop B (the OTHER member, crossing A once).
+         Fallback: if A is too degenerate (e.g. a 3-4 vertex ring produced by
+         heavily-cleaned meshes) and dual_crossing_loop returns None, retry
+         dual_crossing_loop on the loose progenitor, which has enough vertices
+         for the fan-split to succeed. B is the shortest crossing loop by
+         construction so it needs no further tightening.
       3. disk_in_solid classifies each; the loop with disk_in_solid >= threshold
          is the bridge-neck loop to CUT, the other is the funnel loop to AVOID.
 
     Returns a list (one entry per handle) of dicts:
       {"cut": ndarray, "avoid": ndarray, "scores": {"cut": float, "avoid": float},
        "A": ndarray, "B": ndarray, "disk_A": float, "disk_B": float}
-    If B cannot be generated, falls back to {"cut": A, "avoid": None, ...} so the
-    caller still gets the located loop.
+    If B cannot be generated even from the loose loop, falls back to
+    {"cut": A, "avoid": None, ...} so the caller still gets the located loop.
     """
     def _emit(msg):
         if progress_cb is not None:
@@ -179,11 +192,15 @@ def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5, progress_c
     faces = np.asarray(faces)
     mesh_pv = _as_pv(pts, faces)
     located = locate_cut_loops(pts, faces, genus, max_loops=max_loops,
-                               progress_cb=progress_cb)
+                               progress_cb=progress_cb, with_loose=True)
     results = []
-    for hi, A in enumerate(located):
+    for hi, (A, loose) in enumerate(located):
         _emit(f"Computing dual loop {hi + 1}/{len(located)}...")
         B = dual_crossing_loop(pts, faces, A)
+        if B is None and loose is not None and len(loose) > len(A):
+            # Tight loop A too degenerate for fan-split; retry on the loose loop.
+            _emit(f"Dual loop retry on loose progenitor ({len(loose)} verts)...")
+            B = dual_crossing_loop(pts, faces, loose)
         disk_A = disk_in_solid(mesh_pv, pts, A)
         if B is None:
             results.append({"cut": A, "avoid": None, "A": A, "B": None,

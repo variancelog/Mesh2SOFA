@@ -58,7 +58,7 @@ class AlignHeadApp(QtWidgets.QMainWindow):
 
         # State variables
         self.points = []
-        self.targets = ["LEFT EAR (Canal Entrance)", "RIGHT EAR (Canal Entrance)", "NOSE BRIDGE (Nasion)"]
+        self.targets = ["LEFT EAR (Canal Entrance)", "RIGHT EAR (Canal Entrance)", "NOSE TIP (Apex Nasi)"]
         self.current_cursor_point = None
         self.pitch_angle = 0.0
         self.ear_width = 0.0
@@ -74,7 +74,7 @@ class AlignHeadApp(QtWidgets.QMainWindow):
 
         self.setStyleSheet(f"""
             QMainWindow {{ background-color: {BG_COLOR}; }}
-            QWidget {{ background-color: {BG_COLOR}; color: {TEXT_COLOR}; font-family: 'Segoe UI', sans-serif; }}
+            QWidget {{ background-color: {BG_COLOR}; color: {TEXT_COLOR}; font-family: 'Roboto', 'Segoe UI', sans-serif; }}
             QFrame#ControlPanel {{ background-color: {PANEL_COLOR}; border-radius: 10px; }}
             QPushButton {{ background-color: {ACCENT_COLOR}; border-radius: 5px; padding: 8px; font-weight: bold; min-width: 100px; }}
             QPushButton:disabled {{ background-color: #444; color: #888; }}
@@ -109,19 +109,37 @@ class AlignHeadApp(QtWidgets.QMainWindow):
         self.phase1_widget = QtWidgets.QWidget()
         p1_layout = QtWidgets.QVBoxLayout(self.phase1_widget)
 
+        lbl_p1_title = QtWidgets.QLabel("Phase 1:\nPick Alignment Points")
+        lbl_p1_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        lbl_p1_title.setWordWrap(True)
         self.lbl_instruction = QtWidgets.QLabel(f"Pick {self.targets[0]}")
         self.lbl_instruction.setObjectName("InstructionLabel")
         self.lbl_instruction.setWordWrap(True)
+        p1_layout.addWidget(lbl_p1_title)
         p1_layout.addWidget(self.lbl_instruction)
 
-        p1_layout.addWidget(QtWidgets.QLabel("\nControls:\n[P] Capture Point\n[Backspace] Undo"))
-
-        self.lbl_status = QtWidgets.QLabel("Hover mouse and press P")
-        self.lbl_status.setStyleSheet("color: #aaa;")
+        self.lbl_status = QtWidgets.QLabel("\nINSTRUCTIONS:\n" \
+        "In Phase 1 of Alignment, pick 3 alignment points: " \
+        "(1) Left Ear Entrance Point + (2) Right Ear Entrance Point align the mesh to the Frankfurt plane. " \
+        "(3) Nose Tip is to roughly align the mesh's pitch (fore/aft rotation). " \
+        "\nTo pick each point, hover over the point you want to pick (red dot), then press 'P' on the keyboard " \
+        "to pick it (green point). " \
+        "When all 3 points are picked, continue to Phase 2: Pitch Refinement.")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setStyleSheet("color: #CCC;font-size: 14px;")
         p1_layout.addWidget(self.lbl_status)
 
+        lbl_p1_controls = (QtWidgets.QLabel("\nCONTROLS:\n[P] Capture Point\n[Backspace] Undo\n[Left Click + Drag] Rotate\n"
+        "[Middle Click + Drag] Pan\n[Right Click + Drag] Zoom\n"))
+        lbl_p1_controls.setStyleSheet("font-size: 14px;color: #CCC;")
+        p1_layout.addWidget(lbl_p1_controls)
+
+        lbl_selected_points = (QtWidgets.QLabel("SELECTED POINTS:"))
+        lbl_selected_points.setStyleSheet("font-size: 14px;color: #CCC;")
+        p1_layout.addWidget(lbl_selected_points)
+
         self.point_list = QtWidgets.QListWidget()
-        self.point_list.setStyleSheet("background-color: #1a1a1a; border: none;")
+        self.point_list.setStyleSheet("background-color: #111111; border: none;padding:5px")
         p1_layout.addWidget(self.point_list)
 
         self.btn_undo = QtWidgets.QPushButton("Undo Last Point")
@@ -134,7 +152,7 @@ class AlignHeadApp(QtWidgets.QMainWindow):
         self.btn_clear.clicked.connect(self.clear_all_points)
         p1_layout.addWidget(self.btn_clear)
 
-        self.btn_confirm = QtWidgets.QPushButton("Fine Tune Alignment")
+        self.btn_confirm = QtWidgets.QPushButton("Continue...")
         self.btn_confirm.setEnabled(False)
         self.btn_confirm.clicked.connect(self.start_phase_2)
         p1_layout.addWidget(self.btn_confirm)
@@ -146,9 +164,19 @@ class AlignHeadApp(QtWidgets.QMainWindow):
         self.phase2_widget.hide()
         p2_layout = QtWidgets.QVBoxLayout(self.phase2_widget)
 
-        lbl_p2_title = QtWidgets.QLabel("Phase 2: Fine Tuning")
+        lbl_p2_title = QtWidgets.QLabel("Phase 2:\nPitch Refinement")
         lbl_p2_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        lbl_p2_title.setWordWrap(True)
         p2_layout.addWidget(lbl_p2_title)
+
+        self.lbl_status = QtWidgets.QLabel("\nINSTRUCTIONS:\n" \
+        "In Phase 2 of Alignment, use the slider below to fine tune " \
+        "the mesh's pitch (fore/aft rotation). The aim is to have the head in a " \
+        "neutral/level position.\n")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setStyleSheet("color: #CCC;font-size: 14px;")
+        p2_layout.addWidget(self.lbl_status)
+
         p2_layout.addWidget(QtWidgets.QLabel("\nPitch Adjustment (Up/Down):"))
 
         self.slider_pitch = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
@@ -163,7 +191,7 @@ class AlignHeadApp(QtWidgets.QMainWindow):
 
         p2_layout.addStretch()
 
-        self.btn_save = QtWidgets.QPushButton("Save & Inspect")
+        self.btn_save = QtWidgets.QPushButton("Save Aligned Mesh")
         self.btn_save.setObjectName("SaveBtn")
         self.btn_save.clicked.connect(self.save_and_exit)
         p2_layout.addWidget(self.btn_save)
@@ -213,6 +241,7 @@ class AlignHeadApp(QtWidgets.QMainWindow):
             pv.Sphere(radius=0.8, center=point),
             color='green', name=f"confirmed_{idx}", reset_camera=False,
         )
+
         self.point_list.addItem(f"{self.targets[idx]}:\n {np.round(point, 2)}")
 
         if len(self.points) < 3:

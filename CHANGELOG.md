@@ -1,5 +1,62 @@
 # Changelog
 
+## v1.5.0 (2026-06-20) — Formal Mesh Import Pipeline & Tunnel-Loop Robustness
+
+Introduces a formal front-door import step (Browse → inspect → Blender sliver
+dissolve → pymeshfix repair → re-inspect) and fixes the dual cut-loop viewer
+regression that this cleaning caused on degenerate tight-loop meshes.
+
+**1. Formal mesh import (`mesh_inspector.py`, `_project_manager_gui.py`)**
+- New `import_mesh(dest_path, blender_exe)` function and `import_mesh` CLI
+  subcommand. Flow: inspect → Blender `dissolve_degenerate` (if `tiny_faces > 0`)
+  → pymeshfix repair → re-inspect → write `import_report.json`.
+- Blender is **hard-required** at Browse time (blocks with an error if not set) —
+  sliver dissolution only works in Blender.
+- Raw Mesh field made **read-only** (`state="disabled"`); `_set_entry_raw` helper
+  briefly re-enables to write programmatically. Browse is the only entry point.
+- `_check_import_result` post-import popup: success, tunnel-warning, or residual-
+  critical variants. Tunnel warnings are warn-only (can only be fixed post-align).
+- `_bbox_unit_scale(ms)` — distinguishes mm vs metres from bbox diagonal
+  (cutoff 10 units); scales dissolve distance accordingly.
+- `tiny_faces` metric added to `inspect_mesh`: counts faces with min edge < 0.31 mm
+  (unit-scaled); gates the Blender dissolve step and surfaces as a minor issue.
+
+**2. Blender dissolve worker (`blender_scripts/bmesh_cleanup.py` — new)**
+- Headless Blender script: `dissolve_degenerate(dist) + triangulate` on a PLY.
+  Args after `--`: `<in_ply> <out_ply> <dist>`. Called by `_run_blender_dissolve`
+  in `mesh_inspector.py` via `subprocess.run(check=True)`.
+
+**3. Dual cut-loop robustness fix (`tunnel_loop_locator.py`)**
+- The import cleaning collapsed tight loop A to a degenerate 3–4 vertex ring on
+  some meshes. `dual_crossing_loop(A)` requires enough fan faces to split; a
+  4-vertex ring fails → `None` → only one loop shown in the viewer.
+- `locate_cut_loops` gains `with_loose=False` keyword, retaining the loose
+  tree-cotree progenitor (already computed, no extra cost). Default unchanged.
+- `select_cut_loop` retries `dual_crossing_loop` on the loose progenitor when
+  the tight-loop call returns `None` (guarded by `len(loose) > len(A)`).
+  Restores the green/red dual pair without touching tightening or cut/cap logic.
+- Verified on `june_20` mesh: both loops (2.95 mm + 3.50 mm) appear, both sever
+  `genus 1→0`, distinct vertex sets. All 11 tests pass; `test_vectorized_topo`
+  ALL MATCH.
+
+**4. Cap quality improvements (`tunnel_loop_extractor.py`)**
+- `cut_and_cap` / `cut_and_cap_loops` switch from `meshing_close_holes` to
+  **pymeshfix** for hole filling — cleaner caps on complex tunnel geometries.
+- `_remesh_selected_caps`: new helper; retessellates freshly-capped faces + a
+  dilated halo to a uniform ~1.5 mm edge length (isotropic explicit remeshing).
+  Runs between the pymeshfix fill and the Taubin smooth step. Silently no-ops on
+  any PyMeshLab failure (cap is topologically valid at that point regardless).
+- Taubin smoothing params tuned: `smooth_iters=5, taubin_lambda=0.4, taubin_mu=0.2`
+  (previously 3 / 0.5 / −0.53).
+
+**5. Align UI improvements (`align_head.py`)**
+- Phase 1/2 panel text rewritten: fuller instructions, explicit controls list
+  (P / Backspace / drag / pan / zoom), "SELECTED POINTS:" header above the list.
+- Nose landmark renamed "NOSE TIP (Apex Nasi)" (was "NOSE BRIDGE (Nasion)").
+- Phase 2 title updated to "Pitch Refinement"; save button renamed "Save Aligned
+  Mesh" (was "Save & Inspect").
+- Font stack updated to `'Roboto', 'Segoe UI', sans-serif`.
+
 ## v1.4.1 (2026-06-19) — Pipeline Integration, Qt Viewer & ProjectStore
 
 Completes the v1.4.0 mesh inspection & tunnel-loop work: the viewer is a proper

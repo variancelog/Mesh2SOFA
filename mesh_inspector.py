@@ -2,8 +2,67 @@ import pymeshlab
 import json
 import os
 import sys
+import subprocess
+
+import numpy as np
 
 from project_store import ProjectStore, MESH_ALIGNED, MESH_GRADED
+
+# =============================================================================
+# INSPECTION & REPAIR OVERVIEW
+#
+# INITIAL INSPECTION  (inspect_mesh)
+#   All checks use pymeshlab on the original mesh — nothing is modified.
+#
+#   1. pymeshlab get_topological_measures()
+#        holes, boundary_edges, connected components, non-manifold edges,
+#        non-manifold vertices, unreferenced vertices, genus
+#   2. pymeshlab get_geometric_measures()
+#        mesh volume — a negative value means normals point inward
+#   3. pymeshlab (throwaway copy) self-intersection filter
+#        counts self-intersecting faces
+#   4. pymeshlab (throwaway copy) meshing_remove_duplicate_vertices
+#        counts duplicate vertices by diffing vertex count before vs. after
+#   5. pymeshlab (throwaway copy) meshing_remove_null_faces
+#        counts degenerate/zero-area faces by diffing face count before vs. after
+#
+#   Steps 3-5 apply the repair filter on a temporary MeshSet purely to count
+#   defects; the original mesh file is never written during inspection.
+#
+# AUTO-REPAIR  (repair_mesh)
+#   Primary engine — pymeshfix:
+#     Extracts vertex/face matrices via pymeshlab, hands them to
+#     pymeshfix.MeshFix.repair(), then saves the result with pymeshlab.
+#     Fixes: self-intersections, non-manifold edges/vertices, open boundaries.
+#     Preserves genus — topological tunnels (genus > 0) survive and must be
+#     removed separately by the cut+cap step in mesh_problem_viewer.py.
+#
+#   Fallback engine — pymeshlab filter chain (used if pymeshfix errors):
+#     1. meshing_remove_duplicate_vertices
+#     2. meshing_remove_unreferenced_vertices
+#     3. meshing_remove_null_faces
+#     4. meshing_repair_non_manifold_edges
+#     5. meshing_repair_non_manifold_vertices
+#     6. meshing_close_holes (maxholesize=30)
+#     7. meshing_re_orient_faces_coherently
+#     NOTE: does NOT fix self-intersections.
+# =============================================================================
+
+
+def _bbox_unit_scale(ms):
+    """Return 1.0 if the mesh is in millimetres, 0.001 if in metres.
+
+    Distinguishes mm vs metres purely from the bounding-box diagonal:
+    - mm meshes (head-only or head+torso+body): diag >= ~200
+    - metre meshes (even a full 1.8 m body): diag <= ~2
+    A cutoff of 10 sits safely in the gap between those ranges.
+
+    Verified: FABIAN_22k_HATO0.stl (head+torso) diag ~1029 mm → classifies mm.
+    A naive cutoff of 1.0 would misclassify a metre full-body scan (diag ~1.8 m).
+    """
+    vm = ms.current_mesh().vertex_matrix()
+    diag = float(np.linalg.norm(vm.max(axis=0) - vm.min(axis=0)))
+    return 1.0 if diag >= 10.0 else 0.001
 
 
 def _get_si_filter_name(ms):
@@ -38,7 +97,16 @@ def inspect_mesh(path, *, max_freq_hz=None):
         "unreferenced_verts": 0,
         "genus": 0,
         "volume": None,
+        "tiny_faces": 0,
     }
+
+    # --- tiny_faces note ---
+    # Detection threshold: 0.31 mm. Dissolve threshold in bmesh_cleanup.py: 0.3 mm.
+    # blender_scripts/bmesh_cleanup.py uses remove_doubles → dissolve_degenerate
+    # → triangulate → dissolve_degenerate → triangulate (5 passes) to avoid a
+    # known failure mode: dissolve_degenerate alone leaves n-gons that triangulate
+    # then splits back into new thin triangles (observed: 12 slivers → 14 after
+    # a single dissolve+triangulate pass). remove_doubles is the primary fix.
 
     # Track outside the try block so genus classification can use it
     is_two_manifold = True
@@ -112,6 +180,28 @@ def inspect_mesh(path, *, max_freq_hz=None):
     except Exception:
         pass
 
+    # --- Tiny / sliver faces (minor) ---
+    # Counts faces whose shortest edge is below 0.4 mm (unit-scaled).
+    # These are raw-scan artifacts that pymeshfix/pymeshlab cannot remove;
+    # only Blender's bmesh dissolve_degenerate collapses them reliably.
+    try:
+        unit_scale = _bbox_unit_scale(ms)
+        tiny_threshold = 0.31 * unit_scale  # 0.31 mm — slightly above dissolve dist (0.3) to catch all affected faces
+        vm = ms.current_mesh().vertex_matrix()
+        fm = ms.current_mesh().face_matrix()
+        if len(fm) > 0:
+            v0 = vm[fm[:, 0]]
+            v1 = vm[fm[:, 1]]
+            v2 = vm[fm[:, 2]]
+            min_edge = np.minimum(
+                np.minimum(np.linalg.norm(v1 - v0, axis=1),
+                           np.linalg.norm(v2 - v1, axis=1)),
+                np.linalg.norm(v0 - v2, axis=1),
+            )
+            counts["tiny_faces"] = int(np.sum(min_edge < tiny_threshold))
+    except Exception:
+        pass
+
     # --- Wavelength check (info only) ---
     wavelength_warning = None
     if max_freq_hz and counts.get("volume") is not None:
@@ -169,6 +259,14 @@ def inspect_mesh(path, *, max_freq_hz=None):
         minor.append({"issue": f"{counts['null_faces']} null/degenerate face(s)", "count": counts["null_faces"]})
     if counts["unreferenced_verts"] > 0:
         minor.append({"issue": f"{counts['unreferenced_verts']} unreferenced vertex/vertices", "count": counts["unreferenced_verts"]})
+    if counts["tiny_faces"] > 0:
+        minor.append({
+            "issue": (
+                f"{counts['tiny_faces']} tiny/sliver face(s) (min edge < 0.31 mm) — "
+                "Blender dissolve_degenerate required to fix"
+            ),
+            "count": counts["tiny_faces"],
+        })
     if wavelength_warning:
         minor.append({"issue": f"Mesh density low: {wavelength_warning}", "count": 0})
 
@@ -285,6 +383,137 @@ def repair_mesh(in_path, out_path):
     non_tunnel_criticals = [c for c in after.get("critical", []) if not _is_tunnel_issue(c["issue"])]
     success = len(non_tunnel_criticals) == 0
     return {"before": before, "after": after, "success": success, "engine": engine}
+
+
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
+
+def _run_blender_dissolve(in_path, out_path, blender_exe, dist):
+    """Run bmesh_cleanup.py headlessly in Blender to dissolve degenerate/sliver faces.
+
+    Blocking call. Raises subprocess.CalledProcessError on failure (hard-require:
+    callers must not silently skip — sliver removal only works in Blender).
+
+    Args:
+        in_path:     Input mesh path (PLY).
+        out_path:    Output mesh path (PLY, written on success).
+        blender_exe: Absolute path to the Blender executable.
+        dist:        Dissolve distance in mesh units (already unit-scaled by caller).
+    """
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    cleanup_script = os.path.join(scripts_dir, "blender_scripts", "bmesh_cleanup.py")
+
+    cmd = [
+        blender_exe,
+        "--background",
+        "--python", cleanup_script,
+        "--",
+        str(in_path),
+        str(out_path),
+        str(dist),
+    ]
+    subprocess.run(cmd, check=True, creationflags=_CREATE_NO_WINDOW)
+
+
+def import_mesh(dest_path, blender_exe):
+    """Front-door mesh import: inspect → Blender sliver dissolve (if needed) →
+    pymeshfix repair → re-inspect. Overwrites dest_path in place on success.
+
+    Writes import_report.json to the mesh directory. Prints ASCII progress lines
+    so the GUI log stream stays informative. Returns the report dict.
+
+    success semantics: Blender dissolve failure raises (hard-require). A surviving
+    genus (topological tunnel) is warn-only — the import still succeeds because
+    tunnels can only be fixed post-align via the cut & cap step.
+    """
+    def log(msg):
+        print(msg, flush=True)
+
+    mesh_dir = os.path.dirname(os.path.abspath(str(dest_path)))
+    filename = os.path.basename(str(dest_path))
+
+    log(f"--> Import: inspecting {filename}...")
+    before = inspect_mesh(dest_path)
+    log(format_report(before))
+
+    # Derive unit scale for the dissolve distance from the raw mesh bbox diagonal.
+    ms_tmp = pymeshlab.MeshSet()
+    ms_tmp.load_new_mesh(str(dest_path))
+    unit_scale = _bbox_unit_scale(ms_tmp)
+    dissolve_dist = 0.3 * unit_scale  # 0.3 mm in mesh units
+
+    blender_ran = False
+
+    if before["counts"].get("tiny_faces", 0) > 0:
+        log(f"--> {before['counts']['tiny_faces']} tiny/sliver face(s) detected — "
+            f"running Blender degenerate dissolve (dist={dissolve_dist:.6f})...")
+
+        # Convert to a temp PLY for Blender (handles non-PLY originals gracefully).
+        tmp_in  = str(dest_path) + "_bm_in.ply"
+        tmp_out = str(dest_path) + "_bm_out.ply"
+        try:
+            ms_exp = pymeshlab.MeshSet()
+            ms_exp.load_new_mesh(str(dest_path))
+            ms_exp.save_current_mesh(tmp_in)
+
+            _run_blender_dissolve(tmp_in, tmp_out, blender_exe, dissolve_dist)
+            blender_ran = True
+
+            # Load result and save back to dest_path (preserving original format).
+            ms_res = pymeshlab.MeshSet()
+            ms_res.load_new_mesh(tmp_out)
+            ms_res.save_current_mesh(str(dest_path))
+            log("   [OK] Blender dissolve complete.")
+        finally:
+            for p in (tmp_in, tmp_out):
+                if os.path.exists(p):
+                    os.remove(p)
+    else:
+        log("   [i] No tiny faces detected — Blender dissolve skipped.")
+
+    # pymeshfix repair (preserves genus; handles SI/non-manifold/boundaries).
+    log("--> Auto-repair (pymeshfix primary)...")
+    base, ext = os.path.splitext(str(dest_path))
+    repaired_path = base + "_repaired" + (ext if ext else ".ply")
+
+    result = repair_mesh(dest_path, repaired_path)
+    if result["success"]:
+        os.replace(repaired_path, str(dest_path))
+        log(f"   [OK] Repair succeeded (engine={result['engine']}).")
+    else:
+        if os.path.exists(repaired_path):
+            os.remove(repaired_path)
+        log("   [!] Some issues remain after repair (may include tunnels — warn-only).")
+
+    # Re-inspect the final cleaned file.
+    log("--> Re-inspecting cleaned mesh...")
+    after = inspect_mesh(dest_path)
+    log(format_report(after))
+
+    report = {
+        "filename": filename,
+        "blender_dissolve_run": blender_ran,
+        "engine": result["engine"],
+        "before": {
+            "severity": before["severity"],
+            "critical": before["critical"],
+            "minor": before["minor"],
+            "counts": before["counts"],
+        },
+        "after": {
+            "severity": after["severity"],
+            "critical": after["critical"],
+            "minor": after["minor"],
+            "counts": after["counts"],
+        },
+    }
+
+    report_path = os.path.join(mesh_dir, "import_report.json")
+    with open(report_path, 'w') as f:
+        json.dump(report, f, indent=4)
+    log(f"[IMPORT] Complete. Report saved to {report_path}")
+
+    return report
 
 
 def repair_graded(mesh_dir):
@@ -420,6 +649,11 @@ if __name__ == "__main__":
     p_rali = sub.add_parser("repair_aligned", help="Repair aligned_head.ply in place, write aligned_check.json")
     p_rali.add_argument("mesh_dir", help="Directory containing aligned_head.ply")
 
+    p_imp = sub.add_parser("import_mesh",
+                            help="Front-door import: inspect, Blender sliver dissolve, repair, re-inspect")
+    p_imp.add_argument("dest_path", help="Mesh file to clean in place (already copied to Meshes folder)")
+    p_imp.add_argument("blender_exe", help="Absolute path to blender(.exe)")
+
     args = parser.parse_args()
 
     if args.cmd == "inspect":
@@ -443,6 +677,12 @@ if __name__ == "__main__":
 
     elif args.cmd == "repair_aligned":
         repair_aligned(args.mesh_dir)
+
+    elif args.cmd == "import_mesh":
+        report = import_mesh(args.dest_path, args.blender_exe)
+        # Genus (tunnel) is warn-only — exit 0 even when genus > 0.
+        # Non-zero only on hard failure (Blender crash propagates as exception).
+        sys.exit(0)
 
     else:
         parser.print_help()
