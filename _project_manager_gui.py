@@ -666,6 +666,9 @@ class HRTFProjectManager(ctk.CTk):
                     if getattr(self, '_pending_import_check', False):
                         self._pending_import_check = False
                         self.after(200, self._check_import_result)
+                    if getattr(self, '_pending_cutcap_revalidate', False):
+                        self._pending_cutcap_revalidate = False
+                        self.after(200, self._after_cutcap_revalidated)
                 else:
                     self.log(msg, timestamp=False)
         except queue.Empty:
@@ -961,9 +964,31 @@ class HRTFProjectManager(ctk.CTk):
         filename = os.path.basename(src_path)
         dest_path = os.path.join(dest_dir, filename)
 
+        # 4b. Warn before discarding prior pipeline work for this project.
+        existing_artifacts = self._store(project_mesh_dir).list_mesh_artifacts()
+        if existing_artifacts:
+            artifact_list = "\n  ".join(existing_artifacts)
+            if not messagebox.askyesno(
+                "Replace Current Mesh?",
+                "Importing a new mesh will DELETE the existing aligned / graded / "
+                "inspection files in the Meshes folder:\n\n"
+                f"  {artifact_list}\n\n"
+                "Alignment and Inspect & Fix (cut & cap) must be redone for the "
+                "new mesh.\n\nContinue?",
+            ):
+                return
+
         # 5. After the file lands in Meshes/, run the import worker.
         def finalize_selection(final_path):
             self._set_entry_raw(final_path)
+            # New base mesh — prior alignment / inspection / grading no longer
+            # apply.  Clear them so Align + Inspect & Fix must be redone.
+            removed = self._store(project_mesh_dir).reset_mesh_artifacts()
+            if removed:
+                self.log(
+                    "--> Cleared prior mesh artifacts: "
+                    + ", ".join(removed)
+                )
             self.save_project_json(silent=True)
             self.update_workflow_state()
 
@@ -1168,11 +1193,63 @@ class HRTFProjectManager(ctk.CTk):
             viewer = os.path.join(scripts_dir, "mesh_problem_viewer.py")
             ply = os.path.join(mesh_dir, "aligned_head.ply")
             if os.path.exists(ply):
-                self.log("--> Opening tunnel viewer. Apply Cut & Cap inside, then "
-                         "close the viewer — the project will refresh automatically.")
+                self.log("--> Opening tunnel viewer. Choose the cut loop (Tab/Space), "
+                         "then press C to apply Cut & Cap — the viewer will close and "
+                         "re-validate automatically.")
                 proc = subprocess.Popen([sys.executable, viewer, ply],
                                         creationflags=CREATE_NO_WINDOW)
-                self._watch_viewer(proc, self._check_aligned_quality_result)
+                self._watch_viewer(proc, lambda: self._after_tunnel_viewer(mesh_dir))
+
+    def _after_tunnel_viewer(self, mesh_dir):
+        """Called when the tunnel viewer process exits. If the viewer applied a
+        cut & cap it writes cutcap_report.json; if that file is present we run
+        repair_aligned to re-inspect and auto-repair the newly-saved mesh, then
+        show a good/bad popup. If the file is absent the user closed the viewer
+        without cutting, so we fall through to the normal quality-result check."""
+        sentinel = os.path.join(mesh_dir, "cutcap_report.json")
+        if not os.path.exists(sentinel):
+            # User closed without cutting — existing check flow.
+            self._check_aligned_quality_result()
+            return
+        try:
+            os.remove(sentinel)
+        except Exception:
+            pass
+        self.log("--> Cut & cap applied. Re-inspecting and auto-repairing aligned mesh…")
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+        self._pending_cutcap_revalidate = True
+        self._cutcap_mesh_dir = mesh_dir
+        cmd = [sys.executable, "-u", inspector, "repair_aligned", mesh_dir]
+        self.run_external_command(cmd)
+
+    def _after_cutcap_revalidated(self):
+        """Called after the post-cut&cap repair_aligned finishes. Reads
+        aligned_check.json and shows a good/bad popup, then updates the workflow."""
+        mesh_dir = getattr(self, "_cutcap_mesh_dir", None)
+        self.update_workflow_state()
+        if not mesh_dir:
+            return
+        state = self._store(mesh_dir).read_check(MESH_ALIGNED)
+        if state == CleanState.CRITICAL:
+            info = self._store(mesh_dir).read_check_data(MESH_ALIGNED).get("aligned", {})
+            counts = info.get("counts", {})
+            issues_txt = "\n".join(
+                f"  {k}: {v}" for k, v in counts.items()
+                if v not in (0, None, False)
+            )
+            messagebox.showwarning(
+                "Re-validation — Issues Remain",
+                "The mesh was saved after Cut & Cap but still has critical issues:\n\n"
+                f"{issues_txt}\n\n"
+                "Run 'Inspect & Fix Mesh' again to view and address them.",
+            )
+        else:
+            messagebox.showinfo(
+                "All Clear",
+                "Tunnel removed and mesh re-validated — no critical issues remain.\n\n"
+                "You may proceed to Step 3 (Process & Grade).",
+            )
 
     def _check_import_result(self):
         """Called after an import_mesh run — reads import_report.json and shows

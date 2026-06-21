@@ -341,14 +341,17 @@ class TunnelSelector:
     confirm / override by clicking -- the suggestion is a starting point only.
     """
 
-    def __init__(self, plotter, pts, pairs, mesh_path=None, faces=None):
+    def __init__(self, plotter, pts, pairs, mesh_path=None, faces=None,
+                 on_success=None):
         self.pl = plotter
         self.pts = np.asarray(pts)
         self.faces = None if faces is None else np.asarray(faces)
         self.mesh_path = mesh_path
+        self.on_success = on_success  # callable: invoked after a successful cut & cap
         self.center = self.pts.mean(0)
         self.diag = float(np.linalg.norm(self.pts.max(0) - self.pts.min(0)))
-        self.handles = []          # each: {"loops": [idx arrays], "sel": int}
+        self.active = 0             # keyboard-active handle index (Task 4)
+        self.handles = []           # each: {"loops": [idx arrays], "sel": int}
         for pr in pairs:
             loops = [np.asarray(pr["cut"])]
             if pr.get("avoid") is not None:
@@ -362,6 +365,30 @@ class TunnelSelector:
         for hi, h in enumerate(self.handles):
             for li, lp in enumerate(h["loops"]):
                 yield hi, li, lp
+
+    # ------------------------------------------------------------------
+    # Keyboard navigation (Task 4)
+    # ------------------------------------------------------------------
+
+    def next_handle(self):
+        """Cycle to the next handle (Tab key). No-op when there is only one."""
+        if len(self.handles) > 1:
+            self.active = (self.active + 1) % len(self.handles)
+            self.redraw()
+
+    def prev_handle(self):
+        """Cycle to the previous handle (Shift+Tab). No-op when only one handle."""
+        if len(self.handles) > 1:
+            self.active = (self.active - 1) % len(self.handles)
+            self.redraw()
+
+    def toggle_active_loop(self):
+        """Toggle the cut loop selection within the active handle (Space key)."""
+        h = self.handles[self.active]
+        if len(h["loops"]) > 1:
+            h["sel"] = (h["sel"] + 1) % len(h["loops"])
+            self.redraw()
+            self.export()
 
     def focus_points(self):
         return [list(map(float, self.pts[h["loops"][h["sel"]]].mean(0)))
@@ -394,18 +421,42 @@ class TunnelSelector:
             self.export()
 
     def redraw(self):
+        n_handles = len(self.handles)
         for hi, h in enumerate(self.handles):
             sel = h["sel"]
             cut_lp = h["loops"][sel]
+            is_active = (hi == self.active)
+
             for li, lp in enumerate(h["loops"]):
                 is_cut = (li == sel)
-                _draw_loop(self.pl, self.pts[lp],
-                           'lime' if is_cut else 'red',
-                           f'sel_loop_{hi}_{li}', width=7 if is_cut else 4)
+                # Active handle: wider rings so it stands out from inactive ones.
+                if is_active:
+                    width = 9 if is_cut else 5
+                else:
+                    # Inactive handles: draw dimmer/thinner so the active one
+                    # is visually dominant.
+                    width = 5 if is_cut else 3
+
+                color = 'lime' if is_cut else 'red'
+                if not is_active:
+                    # Tint inactive handles slightly different to cue "not focused".
+                    color = '#66cc66' if is_cut else '#cc6666'
+
+                _draw_loop(self.pl, self.pts[lp], color,
+                           f'sel_loop_{hi}_{li}', width=width)
+
+            # Cut-loop label for this handle.
             cc = self.pts[cut_lp].mean(0)
+            cut_label = 'Cut here' if not is_active else (
+                f'Cut here  [active {hi + 1}/{n_handles}]'
+                if n_handles > 1 else 'Cut here  [Space=toggle, C=apply]'
+            )
             _add_labels_with_leaders(
                 self.pl, [cc], [_label_anchor(cc, self.center, self.diag, +1)],
-                ['Cut here'], 'lime', f'sel_cut_lbl_{hi}')
+                [cut_label], 'lime' if is_active else '#66cc66',
+                f'sel_cut_lbl_{hi}')
+
+            # Avoid-loop labels.
             at, aa, al = [], [], []
             for li, lp in enumerate(h["loops"]):
                 if li == sel:
@@ -414,7 +465,22 @@ class TunnelSelector:
                 at.append(ac)
                 aa.append(_label_anchor(ac, self.center, self.diag, -1))
                 al.append('Avoid')
-            _add_labels_with_leaders(self.pl, at, aa, al, 'red', f'sel_avoid_lbl_{hi}')
+            _add_labels_with_leaders(self.pl, at, aa, al,
+                                     'red' if is_active else '#cc6666',
+                                     f'sel_avoid_lbl_{hi}')
+
+        # On-canvas keyboard hint (update every redraw so it stays current).
+        if n_handles > 1:
+            hint = (f"Active handle: {self.active + 1}/{n_handles}  "
+                    f"[Tab=next  Space=toggle  C=apply cut & cap]")
+        else:
+            hint = "Space=toggle loop  C=apply cut & cap  drag=rotate"
+        try:
+            self.pl.add_text(hint, position="lower_right", font_size=9,
+                             color="#9fe6a0", name="kb_hint")
+        except Exception:
+            pass
+
         try:
             self.pl.render()
         except Exception:
@@ -441,9 +507,10 @@ class TunnelSelector:
 
     def apply_cut_and_cap(self):
         """Delete the chosen cut loops' bands and cap the holes in-app, producing
-        a watertight genus-0 mesh. Saves over mesh_path and refreshes the aligned
-        quality check. Falls back to the exported loops (manual Blender) on any
-        failure, leaving the original file untouched."""
+        a watertight genus-0 mesh. Saves over mesh_path, writes a sentinel
+        cutcap_report.json so the GUI can trigger auto re-inspect + repair, then
+        calls self.on_success() to close the viewer. Falls back to the exported
+        loops (manual Blender) on any failure, leaving the original file untouched."""
         if self.faces is None or not self.mesh_path:
             self._status("Cut & cap unavailable (no mesh data)", "#e6a09f")
             return
@@ -459,21 +526,26 @@ class TunnelSelector:
             out = pv.PolyData(new_pts, faces_pv)
             out.save(self.mesh_path)
 
-            # Refresh the aligned-mesh quality check next to the saved file.
-            try:
-                import mesh_inspector
-                report = mesh_inspector.inspect_mesh(self.mesh_path)
-                mesh_inspector._write_aligned_check(
-                    os.path.dirname(self.mesh_path), report)
-            except Exception as e:
-                print(f"[tunnel] aligned_check refresh failed: {e}", file=sys.stderr)
+            # Write a sentinel file so the GUI knows cut & cap ran (not just
+            # that the viewer was closed). The GUI picks this up via
+            # _after_tunnel_viewer() and runs repair_aligned automatically.
+            import json as _json
+            sentinel = os.path.join(os.path.dirname(self.mesh_path),
+                                    "cutcap_report.json")
+            with open(sentinel, "w") as _f:
+                _json.dump({"applied": True,
+                            "mesh": os.path.basename(self.mesh_path)}, _f)
 
-            self._status(
-                "Cut & cap applied -> genus 0. Saved.\n"
-                "Close this window and click 'Inspect & Fix Mesh' to re-validate.",
-                "#9fe6a0")
+            self._status("Tunnel removed — closing and re-validating…", "#9fe6a0")
             print("[tunnel] cut & cap applied; mesh saved watertight (genus 0).",
                   flush=True)
+
+            # Auto-close so the GUI can run the post-cap re-inspect + repair.
+            if callable(self.on_success):
+                try:
+                    self.on_success()
+                except Exception as e:
+                    print(f"[tunnel] on_success callback failed: {e}", file=sys.stderr)
         except Exception as e:
             self._status(
                 f"Auto cut & cap failed: {e}\n"
@@ -523,15 +595,21 @@ def compute_tunnel_data(pts, faces, genus, *, max_pins=5, progress_cb=None):
     return {"mode": "none"}
 
 
-def render_tunnel_data(plotter, data, mesh_path=None):
+def render_tunnel_data(plotter, data, mesh_path=None, on_success=None):
     """Main-thread: draw the computed tunnel data onto the plotter. Returns the
     same dict shape add_tunnel_overlay used (rendered, tight, export_txt,
-    n_loops, focus, selector) or False if nothing to draw."""
+    n_loops, focus, selector) or False if nothing to draw.
+
+    on_success: optional callable forwarded to TunnelSelector — called when
+    cut & cap succeeds so the hosting window can close itself and trigger GUI
+    re-validation.
+    """
     mode = data.get("mode")
 
     if mode == "pairs":
         pts, faces, pairs = data["pts"], data["faces"], data["pairs"]
-        selector = TunnelSelector(plotter, pts, pairs, mesh_path=mesh_path, faces=faces)
+        selector = TunnelSelector(plotter, pts, pairs, mesh_path=mesh_path,
+                                  faces=faces, on_success=on_success)
         return {"rendered": True, "tight": True,
                 "export_txt": selector.export_txt, "n_loops": len(pairs),
                 "focus": selector.focus_points(), "selector": selector}
@@ -682,28 +760,21 @@ def _add_static_overlays(pl, mesh, mesh_path):
     return legend_lines
 
 
-def _enable_loop_picking(pl, selector):
-    """Wire click-to-select and the C = Apply Cut & Cap key onto the plotter."""
-    def _on_pick(*a):
-        selector.on_pick(*a)
-    for kwargs in (
-        dict(callback=_on_pick, left_clicking=True, show_message=False,
-             show_point=False, use_picker=True),
-        dict(callback=_on_pick, left_clicking=True),
-        dict(callback=_on_pick),
-    ):
-        try:
-            pl.enable_point_picking(**kwargs)
-            break
-        except TypeError:
-            continue
-        except Exception as e:
-            print(f"[tunnel] click-to-select unavailable: {e}", file=sys.stderr)
-            break
-    pl.add_text("Click a ring to choose the CUT loop (green)\n"
-                "Press C to Apply Cut & Cap (auto-remove the tunnel)",
-                position="lower_right", font_size=9, color="#9fe6a0",
-                name="pick_hint")
+def _enable_loop_keys(pl, selector):
+    """Wire keyboard controls for loop selection and cut & cap.
+
+    Left-click is intentionally NOT wired for selection — it reverts to pure
+    camera rotation, eliminating the fight between drag-rotate and pick-select.
+
+    Keyboard layout (routed through the Qt eventFilter on the window):
+      Tab / Shift+Tab — cycle handles           (genus > 1 only)
+      Space           — toggle cut loop in the active pair
+      C               — Apply Cut & Cap
+
+    The Tab/Space keys are intercepted at the Qt level (see _ProblemViewerWindow
+    eventFilter) so they never reach pyvista's VTK key handler or Qt's focus
+    traversal. C stays here on the pyvista key event for compatibility.
+    """
     pl.add_key_event('c', lambda: selector.apply_cut_and_cap())
 
 
@@ -796,6 +867,12 @@ def _build_qt_classes():
             pc_layout.addWidget(self.plotter)
             main_layout.addWidget(self.plotter_container, stretch=3)
 
+            # Keyboard state — selector is None until _on_done fires.
+            self._selector = None
+            # Intercept Tab/Space at the Qt level before VTK or focus-traversal
+            # can consume them.  installEventFilter on the interactor widget.
+            self.plotter.installEventFilter(self)
+
             # Central progress overlay (child of plotter_container, positioned by resizeEvent)
             self._overlay = QtWidgets.QFrame(self.plotter_container)
             self._overlay.setStyleSheet(
@@ -828,8 +905,10 @@ def _build_qt_classes():
             panel_layout.addWidget(lbl_title)
 
             lbl_instr = QtWidgets.QLabel(
-                "Click a ring to choose the green CUT loop.\n"
-                "Red = avoid. Press C to apply cut & cap.")
+                "Space — toggle cut loop in active pair\n"
+                "Tab / Shift+Tab — cycle handles (genus > 1)\n"
+                "C — apply Cut & Cap\n"
+                "Drag — rotate camera (no click conflict)")
             lbl_instr.setWordWrap(True)
             lbl_instr.setStyleSheet(f"color: #aaa; font-size: 11px; background: transparent;")
             panel_layout.addWidget(lbl_instr)
@@ -906,6 +985,26 @@ def _build_qt_classes():
             self._overlay.show()
             self._overlay.raise_()
 
+        def eventFilter(self, obj, event):
+            """Intercept Tab/Shift+Tab/Space key presses on the plotter widget
+            for keyboard loop navigation, before Qt focus-traversal or VTK can
+            consume them."""
+            if (self._selector is not None
+                    and event.type() == QtCore.QEvent.Type.KeyPress):
+                key = event.key()
+                Qt = QtCore.Qt
+                if key == Qt.Key.Key_Space:
+                    self._selector.toggle_active_loop()
+                    return True
+                if key == Qt.Key.Key_Tab:
+                    self._selector.next_handle()
+                    return True
+                # Shift+Tab arrives as Key_Backtab in Qt.
+                if key == Qt.Key.Key_Backtab:
+                    self._selector.prev_handle()
+                    return True
+            return super().eventFilter(obj, event)
+
         def resizeEvent(self, ev):
             super().resizeEvent(ev)
             if hasattr(self, '_overlay'):
@@ -930,24 +1029,27 @@ def _build_qt_classes():
             self._btn_reset.setEnabled(True)
             self._btn_close.setEnabled(True)
 
-            found = render_tunnel_data(self.plotter, data, mesh_path=self.mesh_path)
-            if found and found.get("selector") is not None:
-                sel = found["selector"]
-                _enable_loop_picking(self.plotter, sel)
+            found = render_tunnel_data(self.plotter, data, mesh_path=self.mesh_path,
+                                       on_success=self.close)
+            self._selector = found.get("selector") if isinstance(found, dict) else None
+            if found and self._selector is not None:
+                sel = self._selector
+                _enable_loop_keys(self.plotter, sel)
                 self._btn_cut.setEnabled(True)
                 self._btn_cut.clicked.connect(sel.apply_cut_and_cap)
                 self._btn_export.setEnabled(True)
                 self._btn_export.clicked.connect(sel.export)
-                msg = (f"{found['n_loops']} tunnel/handle(s) - each has TWO candidate "
-                       "cut loops (dual pair). GREEN 'Cut here' = chosen, RED 'Avoid' "
-                       "= other. CLICK a ring to choose; press C to cut & cap.")
+                msg = (f"{found['n_loops']} tunnel/handle(s) — dual pair shown. "
+                       "GREEN = cut, RED = avoid. "
+                       "Space=toggle, Tab=next handle, C=apply cut & cap.")
                 if found.get("export_txt"):
                     msg += f" Exported: {os.path.basename(found['export_txt'])}"
                 self.legend_lines.append(msg)
-                self.status_label.setText("Click a ring to choose the cut loop, then press C.")
+                self.status_label.setText(
+                    "Space=toggle cut loop  Tab=next handle  C=apply cut & cap")
                 self._panel_status.setText(
-                    f"{found['n_loops']} tunnel(s) found. GREEN = cut, RED = avoid. "
-                    "Click ring or press C.")
+                    f"{found['n_loops']} tunnel(s) found.\n"
+                    "Space=toggle  Tab=next handle  C=apply")
             elif found:
                 self.legend_lines.append(
                     f"{found['n_loops']} tunnel loop(s) shown (magenta). "

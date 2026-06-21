@@ -18,6 +18,7 @@ calls so the Blender add-on (which reads `project.json` directly) stays
 compatible.
 """
 
+import glob as _glob
 import json
 import os
 from enum import Enum
@@ -130,6 +131,51 @@ class ProjectStore:
             os.remove(self._check_path(mesh))
         except FileNotFoundError:
             pass
+
+    # --- mesh-prep artifact management (used on new-mesh import) ---
+
+    def _mesh_artifact_paths(self):
+        """Return full paths of every derived mesh-prep file that currently
+        exists in mesh_dir.  Raw user meshes and import_report.json are never
+        included — only the fixed-name / pattern outputs produced by the
+        pipeline steps.  Used by both list_mesh_artifacts() and
+        reset_mesh_artifacts() so the artifact set is defined in one place."""
+        md = self.mesh_dir
+        candidates = [
+            # Step 1 outputs
+            os.path.join(md, "aligned_head.ply"),
+            os.path.join(md, "aligned_head_info.json"),
+            # Step 2 check files (via _check_path for consistency)
+            self._check_path(MESH_ALIGNED),   # aligned_check.json
+            self._check_path(MESH_GRADED),    # mesh_check.json
+            # Step 2 sentinel + loop exports
+            os.path.join(md, "cutcap_report.json"),
+        ]
+        # Step 3 graded meshes (e.g. Left_Graded.ply, Right_Graded.ply)
+        candidates.extend(_glob.glob(os.path.join(md, "*_Graded.ply")))
+        # Tunnel-loop exports: aligned_head_cut_loops.npy / .txt
+        candidates.extend(_glob.glob(os.path.join(md, "aligned_head_cut*")))
+        return [p for p in candidates if os.path.exists(p)]
+
+    def list_mesh_artifacts(self):
+        """Basenames of derived mesh-prep files that exist in mesh_dir.
+        Non-destructive — used to populate the confirmation warning before
+        a new mesh import overwrites prior pipeline work."""
+        return [os.path.basename(p) for p in self._mesh_artifact_paths()]
+
+    def reset_mesh_artifacts(self):
+        """Delete all derived mesh-prep files in mesh_dir.  Call before
+        importing a new base mesh so prior alignment / inspection / grading
+        results don't ghost-persist onto the new mesh.  Returns the list of
+        deleted basenames for caller logging.  Idempotent."""
+        removed = []
+        for p in self._mesh_artifact_paths():
+            try:
+                os.remove(p)
+                removed.append(os.path.basename(p))
+            except FileNotFoundError:
+                pass
+        return removed
 
     def write_project(self, data):
         with open(self.project_json_path, "w") as f:

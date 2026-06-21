@@ -1,8 +1,8 @@
 """
-Headless Blender worker — degenerate dissolve + triangulate.
+Headless Blender worker — merge by distance + triangulate.
 
 Collapses tiny sliver triangles (edge length below `dist`) using
-bmesh.ops.dissolve_degenerate, then triangulates to fix any resulting n-gons.
+bmesh.ops.remove_doubles(), then triangulates to fix any resulting n-gons.
 Run via Blender's --background --python flag; do NOT call directly from Python.
 
 Usage:
@@ -11,9 +11,9 @@ Usage:
 Arguments (after --):
   in_ply   Input PLY mesh path
   out_ply  Output PLY mesh path (written on success; in_ply is never modified)
-  dist     Degenerate-dissolve distance threshold in mesh units
-           (caller is responsible for unit scaling: 0.3 for mm meshes, 0.0003
-           for metre meshes)
+  dist     Merge-by-distance threshold in mesh units
+           (caller is responsible for unit scaling via MERGE_FIX_THRESH and 
+           MERGE_DETECT_THRESH parameters)
 """
 import sys
 import bpy
@@ -96,29 +96,14 @@ def run_cleanup():
     bm.from_mesh(obj.data)
 
     # Step 1: Merge vertices within dist — directly collapses sliver triangles
-    # whose vertices are all extremely close together. More aggressive than
-    # dissolve_degenerate alone (which works on edge length and can leave n-gons
-    # that triangulate then splits back into thin triangles).
+    # whose vertices are all extremely close together. Blender's "Merge by distance" 
+    # menu function.
     print(f"[bmesh_cleanup] Step 1: remove_doubles (dist={dist})")
     bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=dist)
 
-    # Step 2: Dissolve any remaining degenerate edges left after vertex merging.
-    print(f"[bmesh_cleanup] Step 2: dissolve_degenerate (dist={dist})")
-    bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges)
-
-    # Step 3: Triangulate — dissolve/merge can leave n-gons; triangulate so the
+    # Step 2: Triangulate — dissolve/merge can leave n-gons; triangulate so the
     # output is a pure triangle mesh (required for BEM/NumCalc).
-    print("[bmesh_cleanup] Step 3: triangulate")
-    bmesh.ops.triangulate(bm, faces=bm.faces)
-
-    # Step 4: Second dissolve pass — triangulate can create new thin edges when
-    # splitting elongated n-gons; clean those up before export.
-    print(f"[bmesh_cleanup] Step 4: dissolve_degenerate pass 2 (dist={dist})")
-    bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges)
-
-    # Step 5: Re-triangulate to ensure output is a pure triangle mesh after
-    # the second dissolve (which can leave n-gons again).
-    print("[bmesh_cleanup] Step 5: triangulate pass 2")
+    print("[bmesh_cleanup] Step 2: triangulate")
     bmesh.ops.triangulate(bm, faces=bm.faces)
 
     bm.to_mesh(obj.data)

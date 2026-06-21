@@ -31,6 +31,7 @@ projects/
 memory/
 research/
 docs/
+graphify-out/
 
 # --- 3D Intermediate Files ---
 # Ignore generated blend files, but keep your 3d_Reference.blend template

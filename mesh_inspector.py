@@ -25,6 +25,10 @@ from project_store import ProjectStore, MESH_ALIGNED, MESH_GRADED
 #        counts duplicate vertices by diffing vertex count before vs. after
 #   5. pymeshlab (throwaway copy) meshing_remove_null_faces
 #        counts degenerate/zero-area faces by diffing face count before vs. after
+#   6. numpy inline scan — tiny_faces
+#        counts faces whose shortest edge is below MERGE_DETECT_THRESH (unit-scaled).
+#        These sliver/degenerate faces are raw-scan artifacts that pymeshfix/pymeshlab
+#        cannot remove; only Blender's bmesh.ops.remove_doubles collapses them.
 #
 #   Steps 3-5 apply the repair filter on a temporary MeshSet purely to count
 #   defects; the original mesh file is never written during inspection.
@@ -46,7 +50,33 @@ from project_store import ProjectStore, MESH_ALIGNED, MESH_GRADED
 #     6. meshing_close_holes (maxholesize=30)
 #     7. meshing_re_orient_faces_coherently
 #     NOTE: does NOT fix self-intersections.
+#
+# FRONT-DOOR IMPORT  (import_mesh)
+#   Runs at Browse-time before alignment.  Flow for each imported mesh:
+#
+#   1. inspect_mesh (full check, including tiny_faces count).
+#   2. If tiny_faces > 0:
+#        _run_blender_dissolve → blender_scripts/bmesh_cleanup.py (headless):
+#          a. bmesh.ops.remove_doubles(dist = MERGE_FIX_THRESH × unit-scale)
+#             Collapses vertices that are closer than `dist`, eliminating
+#             sliver triangles whose edges are all sub-threshold.
+#          b. bmesh.ops.triangulate — re-triangulates any n-gons that
+#             remove_doubles may produce by collapsing an edge of a quad.
+#        Blender is a hard-require: CalledProcessError propagates unchanged.
+#   3. pymeshfix repair (primary) / pymeshlab filter chain (fallback).
+#        Fixes self-intersections, non-manifold edges/vertices, open holes.
+#        Genus (topological tunnels) is preserved — tunnels cannot be removed
+#        until the mesh is aligned (Step 2 cut & cap in mesh_problem_viewer.py).
+#   4. Re-inspect the cleaned mesh → write import_report.json.
+#
+#   Genus/tunnel warnings at import are warn-only (exit 0).  They are flagged
+#   critical only in the Step 2 Inspect & Fix stage.
 # =============================================================================
+
+# ================= CONFIGURATION =================
+MERGE_DETECT_THRESH = .295
+MERGE_FIX_THRESH = .305
+# ================================================= 
 
 
 def _bbox_unit_scale(ms):
@@ -101,12 +131,9 @@ def inspect_mesh(path, *, max_freq_hz=None):
     }
 
     # --- tiny_faces note ---
-    # Detection threshold: 0.31 mm. Dissolve threshold in bmesh_cleanup.py: 0.3 mm.
-    # blender_scripts/bmesh_cleanup.py uses remove_doubles → dissolve_degenerate
-    # → triangulate → dissolve_degenerate → triangulate (5 passes) to avoid a
-    # known failure mode: dissolve_degenerate alone leaves n-gons that triangulate
-    # then splits back into new thin triangles (observed: 12 slivers → 14 after
-    # a single dissolve+triangulate pass). remove_doubles is the primary fix.
+    # Detection threshold: MERGE_DETECT_THRESH. Merge threshold: MERGE_FIX_THRESH.
+    # blender_scripts/bmesh_cleanup.py uses remove_doubles → triangulate.
+    # Triangulate added to avoid a known failure mode: n-gons after merging.
 
     # Track outside the try block so genus classification can use it
     is_two_manifold = True
@@ -181,12 +208,12 @@ def inspect_mesh(path, *, max_freq_hz=None):
         pass
 
     # --- Tiny / sliver faces (minor) ---
-    # Counts faces whose shortest edge is below 0.4 mm (unit-scaled).
+    # Counts faces whose shortest edge is below MERGE_DETECT_THRESH (unit-scaled).
     # These are raw-scan artifacts that pymeshfix/pymeshlab cannot remove;
-    # only Blender's bmesh dissolve_degenerate collapses them reliably.
+    # only Blender's bmesh.ops.remove_doubles collapses them reliably.
     try:
         unit_scale = _bbox_unit_scale(ms)
-        tiny_threshold = 0.31 * unit_scale  # 0.31 mm — slightly above dissolve dist (0.3) to catch all affected faces
+        tiny_threshold = MERGE_DETECT_THRESH * unit_scale  # Detection threshold slightly weaker than fix threshold
         vm = ms.current_mesh().vertex_matrix()
         fm = ms.current_mesh().face_matrix()
         if len(fm) > 0:
@@ -262,8 +289,8 @@ def inspect_mesh(path, *, max_freq_hz=None):
     if counts["tiny_faces"] > 0:
         minor.append({
             "issue": (
-                f"{counts['tiny_faces']} tiny/sliver face(s) (min edge < 0.31 mm) — "
-                "Blender dissolve_degenerate required to fix"
+                f"{counts['tiny_faces']} tiny/sliver face(s) (min edge < {MERGE_DETECT_THRESH} mm) — "
+                "Blender merge-by-distance (remove_doubles) required to fix"
             ),
             "count": counts["tiny_faces"],
         })
@@ -389,16 +416,18 @@ _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 
 
 
 def _run_blender_dissolve(in_path, out_path, blender_exe, dist):
-    """Run bmesh_cleanup.py headlessly in Blender to dissolve degenerate/sliver faces.
+    """Run bmesh_cleanup.py headlessly in Blender to collapse sliver/tiny faces via
+    merge-by-distance (bmesh.ops.remove_doubles + bmesh.ops.triangulate).
 
     Blocking call. Raises subprocess.CalledProcessError on failure (hard-require:
-    callers must not silently skip — sliver removal only works in Blender).
+    callers must not silently skip — sliver collapse only works in Blender).
 
     Args:
         in_path:     Input mesh path (PLY).
         out_path:    Output mesh path (PLY, written on success).
         blender_exe: Absolute path to the Blender executable.
-        dist:        Dissolve distance in mesh units (already unit-scaled by caller).
+        dist:        Merge distance in mesh units (already unit-scaled by caller,
+                     equals MERGE_FIX_THRESH × unit_scale).
     """
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     cleanup_script = os.path.join(scripts_dir, "blender_scripts", "bmesh_cleanup.py")
@@ -416,15 +445,15 @@ def _run_blender_dissolve(in_path, out_path, blender_exe, dist):
 
 
 def import_mesh(dest_path, blender_exe):
-    """Front-door mesh import: inspect → Blender sliver dissolve (if needed) →
+    """Front-door mesh import: inspect → Blender sliver collapse (if needed) →
     pymeshfix repair → re-inspect. Overwrites dest_path in place on success.
 
     Writes import_report.json to the mesh directory. Prints ASCII progress lines
     so the GUI log stream stays informative. Returns the report dict.
 
-    success semantics: Blender dissolve failure raises (hard-require). A surviving
-    genus (topological tunnel) is warn-only — the import still succeeds because
-    tunnels can only be fixed post-align via the cut & cap step.
+    success semantics: Blender merge-by-distance failure raises (hard-require). A
+    surviving genus (topological tunnel) is warn-only — the import still succeeds
+    because tunnels can only be fixed post-align via the cut & cap step.
     """
     def log(msg):
         print(msg, flush=True)
@@ -436,17 +465,17 @@ def import_mesh(dest_path, blender_exe):
     before = inspect_mesh(dest_path)
     log(format_report(before))
 
-    # Derive unit scale for the dissolve distance from the raw mesh bbox diagonal.
+    # Derive unit scale for the merge distance from the raw mesh bbox diagonal.
     ms_tmp = pymeshlab.MeshSet()
     ms_tmp.load_new_mesh(str(dest_path))
     unit_scale = _bbox_unit_scale(ms_tmp)
-    dissolve_dist = 0.3 * unit_scale  # 0.3 mm in mesh units
+    dissolve_dist = MERGE_FIX_THRESH * unit_scale
 
     blender_ran = False
 
     if before["counts"].get("tiny_faces", 0) > 0:
         log(f"--> {before['counts']['tiny_faces']} tiny/sliver face(s) detected — "
-            f"running Blender degenerate dissolve (dist={dissolve_dist:.6f})...")
+            f"running Blender merge-by-distance collapse (dist={dissolve_dist:.6f})...")
 
         # Convert to a temp PLY for Blender (handles non-PLY originals gracefully).
         tmp_in  = str(dest_path) + "_bm_in.ply"
@@ -463,13 +492,13 @@ def import_mesh(dest_path, blender_exe):
             ms_res = pymeshlab.MeshSet()
             ms_res.load_new_mesh(tmp_out)
             ms_res.save_current_mesh(str(dest_path))
-            log("   [OK] Blender dissolve complete.")
+            log("   [OK] Blender merge-by-distance collapse complete.")
         finally:
             for p in (tmp_in, tmp_out):
                 if os.path.exists(p):
                     os.remove(p)
     else:
-        log("   [i] No tiny faces detected — Blender dissolve skipped.")
+        log("   [i] No tiny faces detected — Blender sliver collapse skipped.")
 
     # pymeshfix repair (preserves genus; handles SI/non-manifold/boundaries).
     log("--> Auto-repair (pymeshfix primary)...")
@@ -650,7 +679,7 @@ if __name__ == "__main__":
     p_rali.add_argument("mesh_dir", help="Directory containing aligned_head.ply")
 
     p_imp = sub.add_parser("import_mesh",
-                            help="Front-door import: inspect, Blender sliver dissolve, repair, re-inspect")
+                            help="Front-door import: inspect, Blender sliver collapse (merge-by-distance), repair, re-inspect")
     p_imp.add_argument("dest_path", help="Mesh file to clean in place (already copied to Meshes folder)")
     p_imp.add_argument("blender_exe", help="Absolute path to blender(.exe)")
 

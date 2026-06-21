@@ -6,4 +6,5 @@
 
 ## Mesh processing
 - use bpy/bmesh to run degenerate dissolve on mesh prior to inspect/clean step (setting of .3)
-- flow: degenerate dissolve > triangulate > pymeshfix.clean() > cut_and_cap > 
+- DONE: flow: degenerate dissolve > triangulate > pymeshfix.clean() > cut_and_cap > 
+- After initial cleaning, some small triangles are still left. opening inspect and fix to go to loop cutter warns you but doesn't fix the small triangles?

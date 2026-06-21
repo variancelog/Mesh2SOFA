@@ -11,7 +11,7 @@ An unofficial Python-based GUI orchestrator for [Mesh2HRTF](https://github.com/M
 * **Workflow Management:** Guided 7-step process from raw mesh to final SOFA.
 * **Visual Interface:** User-friendly GUI built with CustomTkinter.
 * **Formal Mesh Import:** Browsing for a raw mesh automatically runs a cleaning pipeline — sliver removal via Blender, structural repair via pymeshfix — before the mesh enters the project.
-* **Mesh Inspection & Repair:** Dedicated step to detect and fix mesh problems (holes, non-manifold edges, self-intersections, topological tunnels). Includes an interactive 3D tunnel viewer with click-to-select cut loops and one-keypress in-app tunnel removal.
+* **Mesh Inspection & Repair:** Dedicated step to detect and fix mesh problems (holes, non-manifold edges, self-intersections, topological tunnels). Includes an interactive 3D tunnel viewer with keyboard-driven loop selection (Space=toggle, Tab=next handle) and one-keypress in-app tunnel removal — viewer auto-closes and re-validates the mesh on success.
 * **Mesh Alignment:** Interactive 3D viewer for aligning the mesh to the Frankfurt plane with point picking and pitch fine-tuning.
 * **Blender Automation:** Automatically sets up scenes for mesh grading and export.
 * **Simulation Control:** Launches NumCalc simulations including "Test Mode" to process only the highest frequencies prior to full simulation.
@@ -77,7 +77,7 @@ To use this orchestrator, you must have the following installed:
 
     * **1. Align Mesh** opens an interactive 3D viewer. In Phase 1, pick three landmarks: Left Ear, Right Ear, and Nose Tip. In Phase 2, use a slider to fine-tune the pitch (tilt) of the head to ensure it is level.
 
-    * **2. Inspect & Fix Mesh** *(optional)* runs a mesh health check on the aligned mesh and shows any detected problems: holes, non-manifold edges, self-intersections, and topological tunnels (genus > 0 "pierced-ear" artifacts that break BEM simulation). You can run an automatic pymeshfix repair pass, or launch the tunnel viewer to cut and cap tunnels interactively — click a candidate loop (green "Cut here" / red "Avoid") to select it, then press **C** to apply the cut in-app. This step is optional — grading will proceed with a warning if you skip it.
+    * **2. Inspect & Fix Mesh** *(optional)* runs a mesh health check on the aligned mesh and shows any detected problems: holes, non-manifold edges, self-intersections, and topological tunnels (genus > 0 "pierced-ear" artifacts that break BEM simulation). You can run an automatic pymeshfix repair pass, or launch the tunnel viewer to cut and cap tunnels interactively — press **Space** to toggle between the two candidate loops (green "Cut here" / red "Avoid"), **Tab** / **Shift+Tab** to cycle handles if multiple tunnels exist, then **C** to apply the cut. The viewer closes automatically and re-validates the mesh. This step is optional — grading will proceed with a warning if you skip it.
 
     * **3. Process & Grade Mesh** uses PyMeshLab to optimize the mesh for your selected resolution (Standard or Lowres), then runs the mesh grading tool to produce optimized left and right meshes for NumCalc.
 

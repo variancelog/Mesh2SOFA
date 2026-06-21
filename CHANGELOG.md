@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.5.2 (2026-06-21) — Keyboard Tunnel Viewer & Import Safety
+
+Replaces click-based loop selection in the tunnel viewer with keyboard-only
+navigation, adds post-cut-&-cap auto-revalidation, and guards re-import with an
+artifact-cleanup confirmation dialog.
+
+**1. Tunnel viewer keyboard navigation (`mesh_problem_viewer.py`)**
+- Click-to-select removed; Space=toggle cut loop, Tab/Shift+Tab=cycle handles,
+  C=apply cut & cap — eliminates the drag-vs-pick conflict.
+- Qt `eventFilter` intercepts Tab/Space before VTK or focus-traversal consumes them.
+- `on_success` callback: viewer auto-closes after a successful cut & cap.
+- Active-handle visual: wider/brighter rings; inactive handles tinted and thinner.
+- On-canvas keyboard hint updates every redraw.
+
+**2. Post-cut-&-cap auto-revalidation (`_project_manager_gui.py`)**
+- Viewer writes `cutcap_report.json` sentinel on success; GUI detects it in
+  `_after_tunnel_viewer`, runs `repair_aligned`, then shows a good/bad popup.
+- `_after_cutcap_revalidated` reads `aligned_check.json` and surfaces residual
+  issues or "All Clear" without requiring the user to re-open Inspect & Fix.
+
+**3. New-mesh import safety (`_project_manager_gui.py`, `project_store.py`)**
+- Before importing a new mesh, a confirmation dialog lists existing pipeline
+  artifacts (aligned mesh, check files, graded meshes, loop exports) and warns
+  they will be deleted.
+- `ProjectStore.list_mesh_artifacts()` / `reset_mesh_artifacts()` enumerate and
+  delete derived files; basenames logged for traceability.
+
+**4. Sliver-collapse simplification (`blender_scripts/bmesh_cleanup.py`, `mesh_inspector.py`)**
+- `bmesh_cleanup.py` reduced from 5 passes to 2 (`remove_doubles` + `triangulate`);
+  extra `dissolve_degenerate` passes were redundant.
+- Constants extracted: `MERGE_DETECT_THRESH = 0.295 mm`, `MERGE_FIX_THRESH = 0.305 mm`.
+- Log messages updated to say "merge-by-distance" throughout.
+
 ## v1.5.1 (2026-06-20)
 
 - Updated readme (it was way out of date).
