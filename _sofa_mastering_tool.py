@@ -10,6 +10,9 @@ from tkinterdnd2 import TkinterDnD, DND_FILES
 # For hiding subprocess windows in .pyw mode
 CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
+# Worker scripts (generate_sofa_outputs.py / generate_extras.py) live in core/.
+CORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core")
+
 # CustomTkinter Theme Settings
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -33,8 +36,7 @@ class SofaMasteringApp(CTkDnDWrapper):
         self.output_mode = ctk.StringVar(value="same") # "same" or "custom"
         self.custom_output_path = ctk.StringVar(value="")
         self.only_48k_value = ctk.BooleanVar(value=False)
-        self.double_length_value = ctk.BooleanVar(value=False)
-        
+
         self.df_output_mode = ctk.StringVar(value="same") # "same" or "custom"
         self.df_custom_output_path = ctk.StringVar(value="")
         self.df_file_prefix = ctk.StringVar(value="")
@@ -100,9 +102,6 @@ class SofaMasteringApp(CTkDnDWrapper):
 
         self.checkbox_only_48k = ctk.CTkCheckBox(self.frame_mastering, text="Only 48kHz (No DFEQ)", variable=self.only_48k_value)
         self.checkbox_only_48k.grid(row=4, column=0, pady=5, padx=15, sticky="w")
-        
-        self.checkbox_double_length = ctk.CTkCheckBox(self.frame_mastering, text="512 sample (edge case use only)", variable=self.double_length_value)
-        self.checkbox_double_length.grid(row=4, column=1, columnspan=2, pady=5, padx=15, sticky="w")
 
         self.frame_mastering.columnconfigure(1, weight=1)
 
@@ -376,8 +375,7 @@ class SofaMasteringApp(CTkDnDWrapper):
     def run_mastering(self):
         if not self.validate_paths(): return
 
-        scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_master = os.path.join(scripts_dir, "generate_sofa_outputs.py")
+        script_master = os.path.join(CORE_DIR, "generate_sofa_outputs.py")
 
         if not os.path.exists(script_master):
             return messagebox.showerror("Missing Script", f"Could not find:\n{script_master}")
@@ -392,8 +390,6 @@ class SofaMasteringApp(CTkDnDWrapper):
             ]
             if self.only_48k_value.get():
                 cmd.append("--only-48k")
-            if self.double_length_value.get():
-                cmd.append("--double-length")
             cmd_lists.append(cmd)
             
         self.run_external_commands(cmd_lists, "Mastered SOFA files generated successfully!")
@@ -404,8 +400,7 @@ class SofaMasteringApp(CTkDnDWrapper):
         tilt_val = round(self.tilt_value.get(), 2)
         bias_val = round(self.bias_value.get(), 2)
         prefix_val = self.df_file_prefix.get().strip()
-        scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_extras = os.path.join(scripts_dir, "generate_extras.py")
+        script_extras = os.path.join(CORE_DIR, "generate_extras.py")
 
         if not os.path.exists(script_extras):
             return messagebox.showerror("Missing Script", f"Could not find:\n{script_extras}")

@@ -359,9 +359,13 @@ def test_dual_loop_none_on_genus0():
 
 def test_dual_loop_matches_ground_truth_cut():
     """DATA-DRIVEN (skips if the real scan is absent): on the genus-1 ear scan,
-    the generated cut loop must match the user's ground-truth manual cut, and
-    the disk-in-solid classifier must label it correctly (cut>=0.5, avoid<0.5)."""
-    here = os.path.dirname(os.path.abspath(__file__))
+    the dual pair must contain the user's ground-truth manual cut, the pair
+    must be labelled by the linking classifier, and the ground-truth ring must
+    be the HANDLE loop (pinned by the 2026-06-16 calibration: the user's cut
+    on THIS mesh was the bridge-neck loop whose disk lies inside the solid).
+    Since select_cut_loop pre-selects the TUNNEL loop, the ground truth here
+    is the AVOID member — the user would toggle on this particular mesh."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root (tests/ is one level down)
     orig = os.path.join(here, "plans", "tunnel-loop", "mesh-genus-1.ply")
     cut = os.path.join(here, "plans", "tunnel-loop", "mesh-genus-1-cut-tunnel.ply")
     if not (os.path.exists(orig) and os.path.exists(cut)):
@@ -375,20 +379,124 @@ def test_dual_loop_matches_ground_truth_cut():
     assert len(pairs) == 1
     pr = pairs[0]
     assert pr["avoid"] is not None, "both dual loops should be found"
-    assert pr["scores"]["cut"] >= 0.5 > pr["scores"]["avoid"], \
-        "classifier polarity: cut loop disk>=0.5, avoid loop disk<0.5"
+    assert pr["labels"] == {"cut": "TUNNEL", "avoid": "HANDLE"}, \
+        f"pair must be classified (got {pr['labels']})"
 
-    # recover the ground-truth removed-vertex ring and compare
+    # recover the ground-truth removed-vertex ring and compare with the
+    # HANDLE-labelled loop (= avoid under the TUNNEL-first default)
     pts_c, _ = load_mesh(cut)
     d, _ = cKDTree(pts_c).query(pts, k=1)
     gt = set(int(i) for i in np.where(d > 1e-4)[0])
-    cut_set = set(int(v) for v in pr["cut"])
-    overlap = len(cut_set & gt)
+    handle_loop = pr["avoid"]
+    overlap = len(set(int(v) for v in handle_loop) & gt)
     assert overlap >= max(3, len(gt) // 2), \
-        f"cut loop must overlap the ground-truth ring (got {overlap}/{len(gt)})"
+        f"HANDLE loop must overlap the ground-truth ring (got {overlap}/{len(gt)})"
     gt_centroid = pts[sorted(gt)].mean(0)
-    dist = float(np.linalg.norm(pts[pr["cut"]].mean(0) - gt_centroid))
-    assert dist < 2.0, f"cut loop centroid must match ground truth (got {dist:.2f} mm)"
+    dist = float(np.linalg.norm(pts[handle_loop].mean(0) - gt_centroid))
+    assert dist < 2.0, f"HANDLE loop centroid must match ground truth (got {dist:.2f} mm)"
+
+
+# ===========================================================================
+# HANDLE/TUNNEL classification via Gauss linking numbers (settled 2026-07-04)
+# ===========================================================================
+def _structured_torus(R=3.0, r=1.0, nu=48, nv=24):
+    """Torus with ANALYTIC meridian/longitude loops (index-constructible).
+
+    meridian  = ring around the tube (fixed toroidal angle) -> HANDLE loop
+    longitude = ring around the central hole (inner equator) -> TUNNEL loop
+    """
+    u = np.arange(nu) * (2 * np.pi / nu)
+    v = np.arange(nv) * (2 * np.pi / nv)
+    uu, vv = np.meshgrid(u, v, indexing="ij")
+    x = (R + r * np.cos(vv)) * np.cos(uu)
+    y = (R + r * np.cos(vv)) * np.sin(uu)
+    z = r * np.sin(vv)
+    pts = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=1)
+    idx = lambda i, j: (i % nu) * nv + (j % nv)
+    faces = []
+    for i in range(nu):
+        for j in range(nv):
+            a, b, c, d = idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)
+            faces.append((a, b, c))
+            faces.append((a, c, d))
+    faces = np.asarray(faces, dtype=np.int64)
+    meridian = np.array([idx(0, j) for j in range(nv)])
+    longitude = np.array([idx(i, nv // 2) for i in range(nu)])
+    return pts, faces, meridian, longitude
+
+
+def test_classifier_torus_analytic_truth():
+    """The linking classifier must label the meridian HANDLE (bounds a disk
+    inside the solid tube) and the longitude TUNNEL (bounds a disk spanning
+    the hole, in air) — analytic ground truth, no data files needed."""
+    from tunnel_loop_locator import classify_handle_tunnel
+    pts, faces, meridian, longitude = _structured_torus()
+    assert mesh_genus(pts, faces) == 1
+    res = classify_handle_tunnel(pts, faces, meridian, longitude)
+    assert res["ok"], f"classification must be definite (got {res})"
+    assert res["label_a"] == "HANDLE", "meridian bounds inside the solid"
+    assert res["label_b"] == "TUNNEL", "longitude bounds in the air"
+    # integrity: in/out linking values are integers differing by exactly 1
+    for lk in (res["lk_a"], res["lk_b"]):
+        ri, ro = round(lk[0]), round(lk[1])
+        assert abs(lk[0] - ri) < 0.1 and abs(lk[1] - ro) < 0.1
+        assert abs(ri - ro) == 1
+
+
+def test_classifier_reversed_orientation_stable():
+    """Labels must not depend on loop traversal direction."""
+    from tunnel_loop_locator import classify_handle_tunnel
+    pts, faces, meridian, longitude = _structured_torus()
+    res = classify_handle_tunnel(pts, faces, meridian[::-1].copy(),
+                                 longitude[::-1].copy())
+    assert res["ok"] and res["label_a"] == "HANDLE" and res["label_b"] == "TUNNEL"
+
+
+def test_select_cut_loop_labels_and_default():
+    """select_cut_loop must return a labelled pair with the TUNNEL loop
+    pre-selected as cut, on the pinched-torus fixture."""
+    from tunnel_loop_locator import select_cut_loop
+    pts, faces = _pinched_torus()
+    pairs = select_cut_loop(pts, faces, 1)
+    assert len(pairs) == 1
+    pr = pairs[0]
+    assert pr["avoid"] is not None
+    assert pr["labels"] == {"cut": "TUNNEL", "avoid": "HANDLE"}
+    for lp in (pr["cut"], pr["avoid"]):
+        g_after, n_holes, n_comp = _genus_after_cut(pts, faces, lp)
+        assert g_after == 0 and n_holes == 2 and n_comp == 1
+
+
+def test_classifier_on_zzmeshes_ground_truth():
+    """DATA-DRIVEN (skips if zzmeshes/ absent): every ground-truth handle pair
+    classifies definitively, and the genus_1 user loop is the HANDLE (pinned
+    calibration) while the genus_2/genus_3 user loops are TUNNELs."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root (tests/ is one level down)
+    base = os.path.join(here, "zzmeshes")
+    if not os.path.isdir(base):
+        pytest.skip("zzmeshes ground-truth folder not present")
+    import pyvista as pv
+    from tunnel_loop_locator import classify_handle_tunnel
+    expected_user_label = {1: "HANDLE", 2: "TUNNEL", 3: "TUNNEL"}
+    for g in (1, 2, 3):
+        d = os.path.join(base, f"genus_{g}")
+        ply = os.path.join(d, "aligned_head.ply")
+        npy = os.path.join(d, "aligned_head_cut_loops.npy")
+        if not (os.path.exists(ply) and os.path.exists(npy)):
+            continue
+        m = pv.read(ply).triangulate().clean()
+        pts = np.asarray(m.points, dtype=np.float64)
+        faces = m.faces.reshape(-1, 4)[:, 1:].astype(np.int64)
+        loops = np.load(npy, allow_pickle=True)
+        loops = ([np.asarray(loops[0], dtype=np.int64)] if loops.ndim == 2
+                 else [np.asarray(l, dtype=np.int64) for l in loops])
+        for hi, A in enumerate(loops):
+            B = dual_crossing_loop(pts, faces, A)
+            assert B is not None, f"genus_{g} h{hi}: no partner loop"
+            res = classify_handle_tunnel(pts, faces, A, np.asarray(B))
+            assert res["ok"], f"genus_{g} h{hi}: ambiguous ({res})"
+            assert res["label_a"] == expected_user_label[g], \
+                f"genus_{g} h{hi}: user loop labelled {res['label_a']}"
 
 
 # ---------------------------------------------------------------------------

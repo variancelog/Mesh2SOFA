@@ -4,51 +4,22 @@ import sys
 import numpy as np
 import sofar as sf
 import scipy.fft as fft
-from scipy.spatial import ConvexHull
 import matplotlib.pyplot as plt
 import csv
 import re
 
-""" Note: To learn more about how this script computes Diffuse Field HRTF 
-    (DFHRTF) from the SOFA files, please read `readme_dfhrtf_calculation.md 
+# Shared diffuse-field weighting (n-design auto-detection + ghost-node hull for
+# open/hemispherical grids). Lives in core/ alongside this script; when the GUI /
+# mastering tool launch `python core/generate_extras.py`, core/ is on sys.path[0]
+# so this flat import resolves.
+from geometry_weights import calculate_geometric_weights, spherical_to_cartesian
+
+""" Note: To learn more about how this script computes Diffuse Field HRTF
+    (DFHRTF) from the SOFA files, please read `core/readme_dfhrtf_calculation.md`
     in the repo """
 
 
 # ================= HELPER FUNCTIONS =================
-
-def spherical_to_cartesian(r, az, el):
-    az_rad = np.radians(az)
-    el_rad = np.radians(el)
-    x = r * np.cos(el_rad) * np.cos(az_rad)
-    y = r * np.cos(el_rad) * np.sin(az_rad)
-    z = r * np.sin(el_rad)
-    return np.column_stack((x, y, z))
-
-def calculate_geometric_weights(source_pos, front_bias=0.0):
-    """Calculates solid angle weights for spherical integration."""
-    az = source_pos[:, 0]
-    el = source_pos[:, 1]
-    cart_coords = spherical_to_cartesian(1.0, az, el)
-    try:
-        hull = ConvexHull(cart_coords)
-        weights = np.zeros(len(cart_coords))
-        for simplex in hull.simplices:
-            A, B, C = cart_coords[simplex]
-            cross_prod = np.cross(B - A, C - A)
-            area = 0.5 * np.linalg.norm(cross_prod)
-            weights[simplex] += area / 3.0
-        weights /= np.sum(weights)
-    except:
-        weights = np.ones(len(source_pos)) / len(source_pos)
-
-    if front_bias > 0.0:
-        x_coords = cart_coords[:, 0]
-        bias_weights = ((1.0 + x_coords) / 2.0) ** front_bias
-        weights = weights * bias_weights
-        if np.sum(weights) > 0:
-            weights /= np.sum(weights)
-
-    return weights
 
 def generate_fractional_octave_frequencies(start_freq, end_freq, fraction=6):
     """Generates log-spaced frequencies."""
@@ -120,6 +91,9 @@ def main():
     parser.add_argument("--output_dir", required=True, help="Output folder")
     parser.add_argument("--tilt", type=float, default=0.0, help="Spectral Tilt (dB/oct)")
     parser.add_argument("--front_bias", type=float, default=0.0, help="Frontal Spatial Bias")
+    parser.add_argument("--weighting-mode", dest="weighting_mode", default="auto",
+                        choices=["auto", "geometric", "uniform"],
+                        help="Diffuse-field grid weighting: auto (n-design detection), geometric, or uniform")
     parser.add_argument("--squigify", action="store_true", help="Enable Squiglink optimized DFHRTF outputs")
     parser.add_argument("--sim_meas", action="store_true", help="Tag output as Simulated instead of Measured")
     parser.add_argument("--prefix", type=str, default="", help="Optional file prefix")
@@ -141,8 +115,23 @@ def main():
     
     # 2. Compute Diffuse Field Response
     print("   -> Calculating Diffuse Field Average...")
+    # Base solid-angle weights: auto-detects genuine t/n-designs (uniform 1/N is
+    # exact) and uses a ghost-node hull that stays correct for open/hemispherical
+    # grids. See core/readme_dfhrtf_calculation.md.
+    weights = calculate_geometric_weights(sofa.SourcePosition,
+                                          advanced_dfeq=True,
+                                          weighting_mode=args.weighting_mode)
+
+    # Frontal spatial bias applied on top (disabled under --squigify), preserving
+    # the mastering tool's --front_bias behaviour without polluting the shared module.
     effective_front_bias = 0.0 if args.squigify else args.front_bias
-    weights = calculate_geometric_weights(sofa.SourcePosition, front_bias=effective_front_bias)
+    if effective_front_bias > 0.0:
+        cart = spherical_to_cartesian(1.0, sofa.SourcePosition[:, 0], sofa.SourcePosition[:, 1])
+        bias_weights = ((1.0 + cart[:, 0]) / 2.0) ** effective_front_bias
+        weights = weights * bias_weights
+        if np.sum(weights) > 0:
+            weights /= np.sum(weights)
+
     n_fft = 16384
     
     # FFT (Measurements, Receivers, Freqs)

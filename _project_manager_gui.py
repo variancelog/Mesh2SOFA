@@ -9,6 +9,12 @@ import threading
 import queue
 import ctypes
 
+# Worker/library modules live in core/. Put it on sys.path so the flat imports
+# below (and any core module imported directly) resolve when the GUI runs from root.
+CORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core")
+if CORE_DIR not in sys.path:
+    sys.path.insert(0, CORE_DIR)
+
 from project_store import ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED
 
 # Hide the console window so running as .py looks like .pyw (no terminal).
@@ -342,7 +348,7 @@ class AlignedMeshDialog(ctk.CTkToplevel):
     """Dialog for the standalone 'Inspect & Fix Mesh' step (operates on the
     aligned mesh). Repair is suppressed when the only criticals are topological
     tunnels (genus>0), which geometric repair cannot fix — those go to the
-    interactive tunnel viewer for click-to-select + cut & cap."""
+    interactive tunnel viewer for click-to-select + Cut+Patch."""
     def __init__(self, parent, mesh_dir, summary, tunnel_only, callback):
         super().__init__(parent)
         self.callback = callback
@@ -357,7 +363,7 @@ class AlignedMeshDialog(ctk.CTkToplevel):
 
         if tunnel_only:
             hint = ("Topological tunnel(s) detected. Geometric repair cannot fix these —\n"
-                    "open the tunnel viewer, click the cut loop, and Apply Cut & Cap.")
+                    "open the tunnel viewer, click the cut loop, and Apply Cut+Patch.")
         else:
             hint = ("Critical mesh issues found. Attempt Repair (pymeshfix) to clean\n"
                     "self-intersections / non-manifold / boundaries, then re-inspect.")
@@ -666,9 +672,9 @@ class HRTFProjectManager(ctk.CTk):
                     if getattr(self, '_pending_import_check', False):
                         self._pending_import_check = False
                         self.after(200, self._check_import_result)
-                    if getattr(self, '_pending_cutcap_revalidate', False):
-                        self._pending_cutcap_revalidate = False
-                        self.after(200, self._after_cutcap_revalidated)
+                    if getattr(self, '_pending_cutpatch_revalidate', False):
+                        self._pending_cutpatch_revalidate = False
+                        self.after(200, self._after_cutpatch_revalidated)
                 else:
                     self.log(msg, timestamp=False)
         except queue.Empty:
@@ -973,7 +979,7 @@ class HRTFProjectManager(ctk.CTk):
                 "Importing a new mesh will DELETE the existing aligned / graded / "
                 "inspection files in the Meshes folder:\n\n"
                 f"  {artifact_list}\n\n"
-                "Alignment and Inspect & Fix (cut & cap) must be redone for the "
+                "Alignment and Inspect & Fix (Cut+Patch) must be redone for the "
                 "new mesh.\n\nContinue?",
             ):
                 return
@@ -998,7 +1004,7 @@ class HRTFProjectManager(ctk.CTk):
                 return
 
             scripts_dir = os.path.dirname(os.path.abspath(__file__))
-            inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+            inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
             self.log(f"--> Importing mesh: {os.path.basename(final_path)} "
                      "(inspect → Blender dissolve → repair)...")
             self._pending_import_check = True
@@ -1181,7 +1187,7 @@ class HRTFProjectManager(ctk.CTk):
 
     def _on_aligned_quality_action(self, action, mesh_dir):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+        inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
 
         if action == "repair":
             self.log("--> Attempting mesh repair on aligned mesh (pymeshfix)...")
@@ -1190,11 +1196,11 @@ class HRTFProjectManager(ctk.CTk):
             self.run_external_command(cmd)
 
         elif action == "visualize":
-            viewer = os.path.join(scripts_dir, "mesh_problem_viewer.py")
+            viewer = os.path.join(CORE_DIR, "mesh_problem_viewer.py")
             ply = os.path.join(mesh_dir, "aligned_head.ply")
             if os.path.exists(ply):
                 self.log("--> Opening tunnel viewer. Choose the cut loop (Tab/Space), "
-                         "then press C to apply Cut & Cap — the viewer will close and "
+                         "then press C to apply Cut+Patch — the viewer will close and "
                          "re-validate automatically.")
                 proc = subprocess.Popen([sys.executable, viewer, ply],
                                         creationflags=CREATE_NO_WINDOW)
@@ -1202,11 +1208,11 @@ class HRTFProjectManager(ctk.CTk):
 
     def _after_tunnel_viewer(self, mesh_dir):
         """Called when the tunnel viewer process exits. If the viewer applied a
-        cut & cap it writes cutcap_report.json; if that file is present we run
+        Cut+Patch it writes cutpatch_report.json; if that file is present we run
         repair_aligned to re-inspect and auto-repair the newly-saved mesh, then
         show a good/bad popup. If the file is absent the user closed the viewer
         without cutting, so we fall through to the normal quality-result check."""
-        sentinel = os.path.join(mesh_dir, "cutcap_report.json")
+        sentinel = os.path.join(mesh_dir, "cutpatch_report.json")
         if not os.path.exists(sentinel):
             # User closed without cutting — existing check flow.
             self._check_aligned_quality_result()
@@ -1215,18 +1221,18 @@ class HRTFProjectManager(ctk.CTk):
             os.remove(sentinel)
         except Exception:
             pass
-        self.log("--> Cut & cap applied. Re-inspecting and auto-repairing aligned mesh…")
+        self.log("--> Cut+Patch applied. Re-inspecting and auto-repairing aligned mesh…")
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        inspector = os.path.join(scripts_dir, "mesh_inspector.py")
-        self._pending_cutcap_revalidate = True
-        self._cutcap_mesh_dir = mesh_dir
+        inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
+        self._pending_cutpatch_revalidate = True
+        self._cutpatch_mesh_dir = mesh_dir
         cmd = [sys.executable, "-u", inspector, "repair_aligned", mesh_dir]
         self.run_external_command(cmd)
 
-    def _after_cutcap_revalidated(self):
-        """Called after the post-cut&cap repair_aligned finishes. Reads
+    def _after_cutpatch_revalidated(self):
+        """Called after the post-cut&patchrepair_aligned finishes. Reads
         aligned_check.json and shows a good/bad popup, then updates the workflow."""
-        mesh_dir = getattr(self, "_cutcap_mesh_dir", None)
+        mesh_dir = getattr(self, "_cutpatch_mesh_dir", None)
         self.update_workflow_state()
         if not mesh_dir:
             return
@@ -1240,7 +1246,7 @@ class HRTFProjectManager(ctk.CTk):
             )
             messagebox.showwarning(
                 "Re-validation — Issues Remain",
-                "The mesh was saved after Cut & Cap but still has critical issues:\n\n"
+                "The mesh was saved after Cut+Patch but still has critical issues:\n\n"
                 f"{issues_txt}\n\n"
                 "Run 'Inspect & Fix Mesh' again to view and address them.",
             )
@@ -1299,7 +1305,7 @@ class HRTFProjectManager(ctk.CTk):
                 "A topological tunnel (genus>0) was detected — this is a scanning "
                 "artifact that cannot be removed on the raw mesh.\n\n"
                 "After running Step 1 (Align), use Step 2 (Inspect & Fix Mesh) to "
-                "locate and remove the tunnel with the interactive cut & cap tool.",
+                "locate and remove the tunnel with the interactive Cut+Patch tool.",
             )
         else:
             messagebox.showinfo("Import Complete", base_msg)
@@ -1312,7 +1318,7 @@ class HRTFProjectManager(ctk.CTk):
 
     def _on_mesh_quality_action(self, action, mesh_path):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+        inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
 
         if action == "repair":
             self.log("--> Attempting mesh repair on graded files...")
@@ -1321,7 +1327,7 @@ class HRTFProjectManager(ctk.CTk):
             self.run_external_command(cmd)
 
         elif action == "visualize":
-            viewer = os.path.join(scripts_dir, "mesh_problem_viewer.py")
+            viewer = os.path.join(CORE_DIR, "mesh_problem_viewer.py")
             try:
                 data = self._store(mesh_path).read_check_data(MESH_GRADED) or {}
                 for side, side_data in data.items():
@@ -1416,7 +1422,7 @@ class HRTFProjectManager(ctk.CTk):
 
     def run_alignment(self):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(scripts_dir, "align_head.py")
+        script_path = os.path.join(CORE_DIR, "align_head.py")
         raw_mesh = self.entry_raw.get()
         if not raw_mesh or not os.path.exists(raw_mesh): return self.log("Error: Select a raw mesh first.")
         
@@ -1434,9 +1440,9 @@ class HRTFProjectManager(ctk.CTk):
 
     def run_inspect_fix(self):
         """Step 2: inspect the aligned mesh; on criticals show the Inspect & Fix
-        dialog (pymeshfix repair + interactive tunnel cut & cap)."""
+        dialog (pymeshfix repair + interactive tunnel Cut+Patch)."""
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        inspector = os.path.join(scripts_dir, "mesh_inspector.py")
+        inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
         mesh_dir = self.get_mesh_dir()
         aligned = os.path.join(mesh_dir, "aligned_head.ply")
         if not os.path.exists(aligned):
@@ -1490,7 +1496,7 @@ class HRTFProjectManager(ctk.CTk):
 
     def _launch_processing(self, mesh_dir, aligned_mesh):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(scripts_dir, "process_and_grade.py")
+        script_path = os.path.join(CORE_DIR, "process_and_grade.py")
         # --- Hopefully now works on both Mac & Windows ---
         grading_exe = self.entry_bins.get()
         # Fallback: If the user manually entered a folder path, try to find the binary
@@ -1570,7 +1576,7 @@ class HRTFProjectManager(ctk.CTk):
         left_proj   = os.path.join(base_folder, "Exports", "Left_Project")
         right_proj  = os.path.join(base_folder, "Exports", "Right_Project")
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        test_script = os.path.join(scripts_dir, "run_numcalc_test.py")
+        test_script = os.path.join(CORE_DIR, "run_numcalc_test.py")
 
         self.log(f"--> Running Stability Test on both ears ({freq_label})...")
         cmd_left  = [sys.executable, "-u", test_script, left_proj,  numcalc_exe]
@@ -1605,7 +1611,7 @@ class HRTFProjectManager(ctk.CTk):
         m2h_root = self.entry_m2h.get()
 
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(scripts_dir, "generate_sofa_outputs.py")
+        script_path = os.path.join(CORE_DIR, "generate_sofa_outputs.py")
 
         base_folder = os.path.normpath(self.entry_base.get())
         output_dir = os.path.join(base_folder, "Output")
@@ -1623,7 +1629,7 @@ class HRTFProjectManager(ctk.CTk):
 
     def run_extras_script(self, tilt_value):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(scripts_dir, "generate_extras.py")
+        script_path = os.path.join(CORE_DIR, "generate_extras.py")
         base_folder = os.path.normpath(self.entry_base.get())
         output_dir = os.path.join(base_folder, "Output")
         
@@ -1650,7 +1656,7 @@ class HRTFProjectManager(ctk.CTk):
 
     def run_vtk_script(self, min_freq, max_freq):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(scripts_dir, "generate_vtk_outputs.py")
+        script_path = os.path.join(CORE_DIR, "generate_vtk_outputs.py")
         
         m2h_root = self.entry_m2h.get()
         base_folder = os.path.normpath(self.entry_base.get())

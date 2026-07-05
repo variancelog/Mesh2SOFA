@@ -38,7 +38,7 @@ graphify-out/
 *.blend
 !3d_Reference.blend
 *.blend1
-*.sofa
+!*.sofa
 *.ply
 *.obj
 *.stl

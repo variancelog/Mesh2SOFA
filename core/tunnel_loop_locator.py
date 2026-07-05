@@ -6,25 +6,27 @@ PURPOSE
 -------
 Find and TIGHTEN the topological cut loop for each handle in a watertight
 mesh, then EXPORT the loop (vertex indices + coordinates) for you to cut
-manually in Blender. This module deliberately does NOT cut or cap the mesh.
+manually in Blender. This module deliberately does NOT cut or patchthe mesh.
 
-WHY NO CUTTING
---------------
-A genus-1 handle has TWO valid cut loops (Dey et al. 2008: the 'handle loop'
-and the 'tunnel loop'). BOTH reduce genus and BOTH pass an Euler-characteristic
-check, but they are geometrically opposite:
+HANDLE vs TUNNEL (settled 2026-07-04)
+-------------------------------------
+A genus-1 handle has TWO valid cut loops (Dey et al. 2008): the HANDLE loop
+(bounds a disk INSIDE the solid; cutting it severs the material bridge) and
+the TUNNEL loop (bounds a disk in the outside AIR; cutting it caps the
+see-through channel flush). BOTH reduce genus and BOTH pass the
+Euler-characteristic check.
 
-  * cutting the BRIDGE-NECK loop  -> removes the membrane, holes cap flush
-    with the surrounding surface  (the clean manual result)
-  * cutting the TUNNEL-MOUTH loop -> slices around the opening, leaving a deep
-    funnel with sliver triangles   (a valid but BEM-hostile result)
+Which is which IS reliably computable on the surface mesh alone — no
+interior/exterior tessellation — via the Gauss linking-number test of
+Dey-Fan-Wang 2013 (see `classify_handle_tunnel` below and
+memory/tunnel-vs-handle-SOLVED-2026-07-04.md; validated 108/108 on the
+zzmeshes ground truth + synthetic torus).
 
-The cut-and-Euler check cannot tell these apart -- distinguishing them
-provably needs the interior/exterior tessellation that HanTun computes.
-So the robust, honest workflow is: let the code LOCATE and TIGHTEN the loop
-(which it does reliably), then YOU make the cut in Blender where you can see
-which loop is the bridge neck. Your manual cut is already clean; this just
-removes the hunting.
+What is NOT computable is which loop the USER wants cut: that depends on
+which side is the scan artifact (ground-truth users cut the HANDLE on one
+mesh, the TUNNEL on five others). So the viewer pre-selects the TUNNEL loop
+(the majority/typical "fill the pierced channel" fix) but the user confirms
+or toggles the choice; the labels make that decision legible.
 
 WHAT THIS GIVES YOU
 -------------------
@@ -129,19 +131,13 @@ def _as_pv(pts, faces):
 
 
 def disk_in_solid(mesh_pv, pts, loop, grid=7):
-    """Fraction of the loop's spanning disk that lies INSIDE the solid.
+    """DEPRECATED (2026-07-04) — superseded by `classify_handle_tunnel`.
 
-    Fan the loop to its centroid, sample each fan triangle on a barycentric
-    grid, and test the samples against the closed mesh with
-    select_enclosed_points. This is the calibrated discriminator between the two
-    dual cut loops of a handle:
-
-        disk_in_solid ~ 1.0  ->  BRIDGE-NECK loop  (spanning disk sits inside the
-                                 solid bridge)               -> the loop to CUT
-        disk_in_solid ~ 0.0  ->  TUNNEL-MOUTH/FUNNEL loop    -> the loop to AVOID
-
-    Polarity pinned from the ground-truth cut (mesh-genus-1-cut-tunnel.ply):
-    the user's chosen loop measured 1.0, the funnel loop 0.0. Threshold 0.5.
+    Fraction of the loop's fan-disk samples inside the solid. This was the
+    old cut/avoid hint; it conflates fan-disk GEOMETRY with the topological
+    handle/tunnel question and breaks on loose or degenerate loops (see
+    memory/tunnel-loop-lessons-learned-2026-06-17.md). Kept only for
+    reference/diagnostics; no longer called by `select_cut_loop`.
     """
     pts = np.asarray(pts, dtype=np.float64)
     P = pts[np.asarray(loop)]
@@ -160,7 +156,180 @@ def disk_in_solid(mesh_pv, pts, loop, grid=7):
     return float(np.asarray(sel["SelectedPoints"]).mean())
 
 
-def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5, progress_cb=None):
+# ---------------------------------------------------------------------------
+# HANDLE/TUNNEL classification via Gauss linking numbers (settled 2026-07-04)
+# ---------------------------------------------------------------------------
+# Method (Dey-Fan-Wang 2013, Lemma 3.3, reduced to the dual-pair case; see
+# research/genus_An efficient computation of handle and tunnel loops via Reeb
+# graphs.md and memory/tunnel-vs-handle-SOLVED-2026-07-04.md):
+# push a loop epsilon off the surface to both sides and take the Gauss linking
+# number with its dual partner. "Pushing into the side where the loop bounds
+# kills the linking":  lk_in = 0 -> HANDLE (bounds inside the solid),
+# lk_out = 0 -> TUNNEL (bounds in the air). Always |lk_in - lk_out| = 1
+# because the pair crosses at exactly one vertex — a built-in integrity check.
+# Validated 108/108 (zzmeshes ground truth x seeds x epsilon x orientation)
+# plus an analytic torus; experiment: plans/tunnel-loop/linking_classifier.py.
+
+def _gauss_linking(P, Q):
+    """Gauss linking number of closed polylines P (n,3), Q (m,3).
+
+    Exact polygonal double sum of signed solid angles (Klenin & Langowski
+    2000, method 1a). Near-integer for disjoint curves.
+    """
+    P = np.asarray(P, dtype=np.float64)
+    Q = np.asarray(Q, dtype=np.float64)
+    P2 = np.roll(P, -1, axis=0)
+    Q2 = np.roll(Q, -1, axis=0)
+    dQ = Q2 - Q
+    total = 0.0
+
+    def _unit(v):
+        nn = np.linalg.norm(v, axis=1, keepdims=True)
+        nn = np.where(nn < 1e-14, 1.0, nn)
+        return v / nn
+
+    for i in range(len(P)):
+        p1, p2 = P[i], P2[i]
+        r13 = Q - p1
+        r14 = Q2 - p1
+        r24 = Q2 - p2
+        r23 = Q - p2
+        n1 = _unit(np.cross(r13, r14))
+        n2 = _unit(np.cross(r14, r24))
+        n3 = _unit(np.cross(r24, r23))
+        n4 = _unit(np.cross(r23, r13))
+        s = (np.arcsin(np.clip(np.einsum("ij,ij->i", n1, n2), -1, 1))
+             + np.arcsin(np.clip(np.einsum("ij,ij->i", n2, n3), -1, 1))
+             + np.arcsin(np.clip(np.einsum("ij,ij->i", n3, n4), -1, 1))
+             + np.arcsin(np.clip(np.einsum("ij,ij->i", n4, n1), -1, 1)))
+        sign = np.sign(np.einsum("ij,ij->i", np.cross(dQ, (p2 - p1)[None, :]), r13))
+        total += float((s * sign).sum())
+    return total / (4.0 * np.pi)
+
+
+def _vertex_normals(pts, faces):
+    """Area-weighted vertex normals (orientation as given by face winding)."""
+    fn = np.cross(pts[faces[:, 1]] - pts[faces[:, 0]],
+                  pts[faces[:, 2]] - pts[faces[:, 0]])
+    vn = np.zeros_like(pts)
+    for k in range(3):
+        np.add.at(vn, faces[:, k], fn)
+    nn = np.linalg.norm(vn, axis=1, keepdims=True)
+    nn = np.where(nn < 1e-14, 1.0, nn)
+    return vn / nn
+
+
+def _min_incident_edge(pts, faces):
+    """Per-vertex minimum incident edge length (push-distance scale)."""
+    e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    L = np.linalg.norm(pts[e[:, 0]] - pts[e[:, 1]], axis=1)
+    out = np.full(len(pts), np.inf)
+    np.minimum.at(out, e[:, 0], L)
+    np.minimum.at(out, e[:, 1], L)
+    return out
+
+
+def _points_inside(mesh_pv, pts_query):
+    """Boolean inside-mask via ray parity — immune to flipped normals."""
+    import pyvista as pv
+    sel = pv.PolyData(np.asarray(pts_query)).select_enclosed_points(
+        mesh_pv, tolerance=1e-6, check_surface=False)
+    return np.asarray(sel["SelectedPoints"]).astype(bool)
+
+
+def _outward_normals(mesh_pv, pts, faces, n_probe=200, seed=0):
+    """(vertex normals oriented OUTWARD, probe agreement fraction).
+
+    File-winding normals can point inward ("black in MeshLab" meshes), so the
+    global sign is fixed empirically with a ray-parity probe.
+    """
+    vn = _vertex_normals(pts, faces)
+    mine = _min_incident_edge(pts, faces)
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(pts), size=min(n_probe, len(pts)), replace=False)
+    eps = 0.3 * mine[idx]
+    inside = _points_inside(mesh_pv, pts[idx] + eps[:, None] * vn[idx])
+    frac_in = float(inside.mean())
+    if frac_in > 0.5:
+        vn = -vn
+    return vn, mine, max(frac_in, 1.0 - frac_in)
+
+
+def _push_loop_in_out(mesh_pv, pts, vn, mine, loop, max_halvings=5):
+    """Push a loop epsilon inside AND outside along outward normals.
+
+    Every pushed point is parity-verified on its intended side; per-vertex
+    epsilon starts at 0.3x the min incident edge and halves individually until
+    parity passes (thin walls). Returns (curve_in, curve_out, ok).
+    """
+    loop = np.asarray(loop, dtype=np.int64)
+    n = len(loop)
+    eps_in = 0.3 * mine[loop]
+    eps_out = eps_in.copy()
+    for _ in range(max_halvings + 1):
+        c_in = pts[loop] - eps_in[:, None] * vn[loop]
+        c_out = pts[loop] + eps_out[:, None] * vn[loop]
+        inside = _points_inside(mesh_pv, np.vstack([c_in, c_out]))
+        bad_in = ~inside[:n]
+        bad_out = inside[n:]
+        if not bad_in.any() and not bad_out.any():
+            return c_in, c_out, True
+        eps_in[bad_in] *= 0.5
+        eps_out[bad_out] *= 0.5
+    return c_in, c_out, False
+
+
+def _classify_one(mesh_pv, pts, vn, mine, loop, partner):
+    """Linking-number label for `loop` given its dual `partner`.
+
+    Returns (label, lk_in, lk_out) with label in {HANDLE, TUNNEL, AMBIGUOUS}.
+    """
+    c_in, c_out, push_ok = _push_loop_in_out(mesh_pv, pts, vn, mine, loop)
+    Pq = pts[np.asarray(partner, dtype=np.int64)]
+    lk_in = _gauss_linking(c_in, Pq)
+    lk_out = _gauss_linking(c_out, Pq)
+    ri, ro = int(round(lk_in)), int(round(lk_out))
+    near_int = abs(lk_in - ri) < 0.1 and abs(lk_out - ro) < 0.1
+    ok = push_ok and near_int and abs(ri - ro) == 1
+    if ok and ri == 0 and ro != 0:
+        label = "HANDLE"
+    elif ok and ro == 0 and ri != 0:
+        label = "TUNNEL"
+    else:
+        label = "AMBIGUOUS"
+    return label, lk_in, lk_out
+
+
+def classify_handle_tunnel(pts, faces, loop_a, loop_b, *, mesh_pv=None,
+                           vn=None, mine=None):
+    """Classify a dual cut-loop pair as (handle, tunnel) — surface-only.
+
+    loop_a / loop_b: the two dual loops of one handle (vertex-index arrays,
+    crossing at exactly one vertex, e.g. from dual_crossing_loop).
+
+    Returns a dict:
+      {"label_a", "label_b": "HANDLE"|"TUNNEL"|"AMBIGUOUS",
+       "lk_a": (lk_in, lk_out), "lk_b": (lk_in, lk_out), "ok": bool}
+    ok=True only when both labels are definite AND complementary — on any
+    integrity-check failure both labels come back AMBIGUOUS/ok=False rather
+    than a silently wrong answer.
+    """
+    pts = np.asarray(pts, dtype=np.float64)
+    faces = np.asarray(faces)
+    if mesh_pv is None:
+        mesh_pv = _as_pv(pts, faces)
+    if vn is None or mine is None:
+        vn, mine, _ = _outward_normals(mesh_pv, pts, faces)
+    la, ai, ao = _classify_one(mesh_pv, pts, vn, mine, loop_a, loop_b)
+    lb, bi, bo = _classify_one(mesh_pv, pts, vn, mine, loop_b, loop_a)
+    ok = {la, lb} == {"HANDLE", "TUNNEL"}
+    if not ok:
+        la = lb = "AMBIGUOUS"
+    return {"label_a": la, "label_b": lb,
+            "lk_a": (ai, ao), "lk_b": (bi, bo), "ok": ok}
+
+
+def select_cut_loop(pts, faces, genus, *, max_loops=5, progress_cb=None):
     """For each handle, return the dual loop pair labelled cut vs avoid.
 
     Pipeline:
@@ -172,14 +341,18 @@ def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5, progress_c
          dual_crossing_loop on the loose progenitor, which has enough vertices
          for the fan-split to succeed. B is the shortest crossing loop by
          construction so it needs no further tightening.
-      3. disk_in_solid classifies each; the loop with disk_in_solid >= threshold
-         is the bridge-neck loop to CUT, the other is the funnel loop to AVOID.
+      3. classify_handle_tunnel labels the pair via Gauss linking numbers
+         (reliable, topological — see module docstring). The TUNNEL loop is
+         pre-selected as "cut" (the typical pierced-channel fix: flush caps);
+         the HANDLE loop is "avoid". The USER still confirms/toggles in the
+         viewer — which loop to cut depends on which side is the artifact.
 
     Returns a list (one entry per handle) of dicts:
-      {"cut": ndarray, "avoid": ndarray, "scores": {"cut": float, "avoid": float},
-       "A": ndarray, "B": ndarray, "disk_A": float, "disk_B": float}
-    If B cannot be generated even from the loose loop, falls back to
-    {"cut": A, "avoid": None, ...} so the caller still gets the located loop.
+      {"cut": ndarray, "avoid": ndarray|None, "A": ndarray, "B": ndarray|None,
+       "labels": {"cut": "TUNNEL"|"HANDLE"|"UNKNOWN", "avoid": ...|None},
+       "linking": {"cut": (lk_in, lk_out)|None, "avoid": ...|None}}
+    If B cannot be generated, falls back to {"cut": A, "avoid": None, ...}.
+    If classification is AMBIGUOUS, cut=A / avoid=B with labels "UNKNOWN".
     """
     def _emit(msg):
         if progress_cb is not None:
@@ -193,6 +366,10 @@ def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5, progress_c
     mesh_pv = _as_pv(pts, faces)
     located = locate_cut_loops(pts, faces, genus, max_loops=max_loops,
                                progress_cb=progress_cb, with_loose=True)
+    vn = mine = None
+    if located:
+        _emit("Orienting surface normals (parity probe)...")
+        vn, mine, _ = _outward_normals(mesh_pv, pts, faces)
     results = []
     for hi, (A, loose) in enumerate(located):
         _emit(f"Computing dual loop {hi + 1}/{len(located)}...")
@@ -201,21 +378,32 @@ def select_cut_loop(pts, faces, genus, *, threshold=0.5, max_loops=5, progress_c
             # Tight loop A too degenerate for fan-split; retry on the loose loop.
             _emit(f"Dual loop retry on loose progenitor ({len(loose)} verts)...")
             B = dual_crossing_loop(pts, faces, loose)
-        disk_A = disk_in_solid(mesh_pv, pts, A)
         if B is None:
             results.append({"cut": A, "avoid": None, "A": A, "B": None,
-                            "disk_A": disk_A, "disk_B": None,
-                            "scores": {"cut": disk_A, "avoid": None}})
+                            "labels": {"cut": "UNKNOWN", "avoid": None},
+                            "linking": {"cut": None, "avoid": None}})
             continue
-        disk_B = disk_in_solid(mesh_pv, pts, B)
-        # the loop to cut is the one whose spanning disk is inside the solid
-        if disk_B >= disk_A:
-            cut, avoid, sc, sa = B, A, disk_B, disk_A
+        _emit(f"Classifying handle/tunnel {hi + 1}/{len(located)}...")
+        cls = classify_handle_tunnel(pts, faces, A, B, mesh_pv=mesh_pv,
+                                     vn=vn, mine=mine)
+        if cls["ok"]:
+            # Pre-select the TUNNEL loop: cutting it fills the see-through
+            # channel with flush caps (the typical artifact fix; 5 of 6
+            # ground-truth handles). The user can toggle to the HANDLE loop.
+            if cls["label_a"] == "TUNNEL":
+                cut, avoid = A, B
+                lk_cut, lk_avoid = cls["lk_a"], cls["lk_b"]
+            else:
+                cut, avoid = B, A
+                lk_cut, lk_avoid = cls["lk_b"], cls["lk_a"]
+            labels = {"cut": "TUNNEL", "avoid": "HANDLE"}
+            linking = {"cut": lk_cut, "avoid": lk_avoid}
         else:
-            cut, avoid, sc, sa = A, B, disk_A, disk_B
+            cut, avoid = A, B
+            labels = {"cut": "UNKNOWN", "avoid": "UNKNOWN"}
+            linking = {"cut": cls["lk_a"], "avoid": cls["lk_b"]}
         results.append({"cut": cut, "avoid": avoid, "A": A, "B": B,
-                        "disk_A": disk_A, "disk_B": disk_B,
-                        "scores": {"cut": sc, "avoid": sa}})
+                        "labels": labels, "linking": linking})
     return results
 
 
@@ -232,12 +420,12 @@ def score_loop_quality(pts, faces, loop, vertex_normals=None):
     manual result, record the descriptor values).
 
     Descriptors returned (dict):
-      cap_planarity        : svd s3/s1 of loop verts (small = flat ring)
-      cap_surface_angle_deg: angle between the loop's best-fit-plane normal and
+      patch_planarity        : svd s3/s1 of loop verts (small = flat ring)
+      patch_surface_angle_deg: angle between the loop's best-fit-plane normal and
                              the mean surface normal on the loop. Hypothesis:
-                             a bridge-neck cap is roughly FLUSH (cap plane
+                             a bridge-neck patchis roughly FLUSH (patchplane
                              contains the surface normal -> larger angle),
-                             a tunnel-mouth cap spans the opening (cap plane
+                             a tunnel-mouth patchspans the opening (patchplane
                              perpendicular to surface normal -> smaller angle).
       hole_depths_mm       : after cutting the 1-ring band, out-of-plane depth
                              of each resulting boundary hole (deep = funnel).
@@ -248,17 +436,17 @@ def score_loop_quality(pts, faces, loop, vertex_normals=None):
     P = pts[loop]
     c = P.mean(0)
     _, s, vt = np.linalg.svd(P - c)
-    cap_n = vt[2] / np.linalg.norm(vt[2])
+    patch_n = vt[2] / np.linalg.norm(vt[2])
     planarity = float(s[2] / s[0]) if s[0] > 0 else 0.0
 
     if vertex_normals is not None:
         surf_n = np.asarray(vertex_normals)[loop].mean(0)
         nn = np.linalg.norm(surf_n)
         surf_n = surf_n / nn if nn > 0 else surf_n
-        cap_surface_angle = float(np.degrees(
-            np.arccos(np.clip(abs(cap_n @ surf_n), 0, 1))))
+        patch_surface_angle = float(np.degrees(
+            np.arccos(np.clip(abs(patch_n @ surf_n), 0, 1))))
     else:
-        cap_surface_angle = float('nan')
+        patch_surface_angle = float('nan')
 
     # depth of each resulting hole after band deletion
     loop_set = set(int(x) for x in loop)
@@ -288,8 +476,8 @@ def score_loop_quality(pts, faces, loop, vertex_normals=None):
         depths.append(float(np.abs((Q - cc) @ n).max()))
 
     return {
-        "cap_planarity": planarity,
-        "cap_surface_angle_deg": cap_surface_angle,
+        "patch_planarity": planarity,
+        "patch_surface_angle_deg": patch_surface_angle,
         "hole_depths_mm": depths,
         "max_hole_depth_mm": max(depths) if depths else 0.0,
     }
@@ -374,20 +562,24 @@ if __name__ == "__main__":
 
     pairs = select_cut_loop(pts, faces, g)
     print(f"located {len(pairs)} handle(s); for each, the dual loop pair "
-          f"(disk_in_solid >= 0.5 = CUT this, the bridge neck):")
+          f"(pre-selected cut = TUNNEL loop, flush channel fill):")
     cut_loops = []
     for i, pr in enumerate(pairs):
         cut, avoid = pr["cut"], pr["avoid"]
         cut_loops.append(cut)
         cc = pts[cut].mean(0)
+        lk_c = pr["linking"]["cut"]
+        lk_c = "" if lk_c is None else f", lk(in,out)=({lk_c[0]:+.2f},{lk_c[1]:+.2f})"
         print(f"  handle {i}:")
         print(f"    CUT   : {len(cut):3d} verts, {_loop_len(pts, cut):6.2f} mm, "
-              f"centroid {cc.round(1)}, disk_in_solid={pr['scores']['cut']:.3f}, "
+              f"centroid {cc.round(1)}, {pr['labels']['cut']}{lk_c}, "
               f"cut->{_genus_after_cut(pts, faces, cut)}")
         if avoid is not None:
             ac = pts[avoid].mean(0)
+            lk_a = pr["linking"]["avoid"]
+            lk_a = "" if lk_a is None else f", lk(in,out)=({lk_a[0]:+.2f},{lk_a[1]:+.2f})"
             print(f"    AVOID : {len(avoid):3d} verts, {_loop_len(pts, avoid):6.2f} mm, "
-                  f"centroid {ac.round(1)}, disk_in_solid={pr['scores']['avoid']:.3f}")
+                  f"centroid {ac.round(1)}, {pr['labels']['avoid']}{lk_a}")
         else:
             print(f"    (dual loop B not found; cut loop is the located loop A)")
 

@@ -1,23 +1,74 @@
 # Changelog
 
+## v1.6.0 (2026-07-05) — Repo Reorg, Smarter DFHRTF Weighting & Cut-and-Patch
+
+Splits the flat repo into `core/` (worker/library modules) and `tests/`, upgrades
+the diffuse-field weighting to auto-detect spherical designs and handle
+hemispherical grids correctly, trims a mastering-tool option, and lands the
+tunnel "cut & patch" rename plus cap-quality improvements.
+
+**1. Repository layout (`core/`, `tests/`)**
+- All worker/library modules moved from root into `core/` (`align_head.py`,
+  `mesh_inspector.py`, `mesh_problem_viewer.py`, `process_and_grade.py`,
+  `run_numcalc_test.py`, `generate_sofa_outputs.py`, `generate_extras.py`,
+  `generate_vtk_outputs.py`, `project_store.py`, `tunnel_loop_extractor.py`,
+  `tunnel_loop_locator.py`, plus the new `geometry_weights.py`) alongside
+  `readme_dfhrtf_calculation.md`. Only the user-run `_*.py` entry points remain in root.
+- Test suite moved to `tests/` with a `conftest.py` that puts `core/` on `sys.path`.
+- Entry points (`_project_manager_gui.py`, `_sofa_mastering_tool.py`) add a
+  `CORE_DIR` bridge and launch every worker from `core/`; worker↔worker flat
+  imports are unchanged (each runs as `python core/<worker>.py`).
+- `mesh_inspector.py` now climbs one level out of `core/` to reach
+  `blender_scripts/bmesh_cleanup.py`; `plans/tunnel-loop/` harnesses updated for the new paths.
+
+**2. Smarter DFHRTF weighting (`core/geometry_weights.py`, `generate_extras.py`)**
+- New shared `geometry_weights.py` (ported verbatim from the sofa_buddy project)
+  auto-detects genuine spherical t/n-designs via a spherical-design quadrature
+  test and returns exact uniform `1/N` weights for them (no error from
+  unnecessary weighting).
+- Non-design grids use a **ghost-node ConvexHull** (dense Fibonacci-cap of dummy
+  points below the lowest real node) so open/hemispherical grids (e.g. ARI) get
+  true solid-angle coverage instead of a bare-hull "floor" artifact.
+- `generate_extras.py` consumes it, preserves the `--front_bias` post-step, and
+  adds a `--weighting-mode {auto,geometric,uniform}` flag (default `auto`).
+- Verified end-to-end on real fixtures: N-Design_55 → uniform, ARI → geometric.
+- `readme_dfhrtf_calculation.md` rewritten to document the new method.
+
+**3. Mastering tool cleanup (`_sofa_mastering_tool.py`)**
+- Removed the "512 sample (edge case use only)" checkbox and its
+  `--double-length` wiring — not needed for simulated HRTFs.
+
+**4. Tunnel cut & patch (`tunnel_loop_extractor.py`, `tunnel_loop_locator.py`, `mesh_problem_viewer.py`)**
+- "cut & cap" renamed to "cut & patch" throughout (`cut_and_patch`,
+  `cut_and_patch_loops`, `cutpatch_report.json`).
+- Hole filling switched from `meshing_close_holes` to **pymeshfix** for cleaner
+  caps; new cap-halo remesh + tuned Taubin smoothing.
+- `select_cut_loop` restores the green/red dual-loop pair by retrying
+  `dual_crossing_loop` on the loose progenitor when the tight-loop call returns `None`.
+
+**5. Reference grids & test fixtures**
+- Added `evaluation_grids/` (N-Design / T-Design node sets + generator/plot scripts)
+  and two `tests/*.sofa` fixtures (ARI hemispherical, N-Design_55 uniform) for
+  grid-weighting checks. `*.sofa` un-ignored in `.gitignore` so fixtures can ship.
+
 ## v1.5.2 (2026-06-21) — Keyboard Tunnel Viewer & Import Safety
 
 Replaces click-based loop selection in the tunnel viewer with keyboard-only
-navigation, adds post-cut-&-cap auto-revalidation, and guards re-import with an
+navigation, adds post-cut-&-patch auto-revalidation, and guards re-import with an
 artifact-cleanup confirmation dialog.
 
 **1. Tunnel viewer keyboard navigation (`mesh_problem_viewer.py`)**
 - Click-to-select removed; Space=toggle cut loop, Tab/Shift+Tab=cycle handles,
-  C=apply cut & cap — eliminates the drag-vs-pick conflict.
+  C=apply Cut+Patch — eliminates the drag-vs-pick conflict.
 - Qt `eventFilter` intercepts Tab/Space before VTK or focus-traversal consumes them.
-- `on_success` callback: viewer auto-closes after a successful cut & cap.
+- `on_success` callback: viewer auto-closes after a successful Cut+Patch.
 - Active-handle visual: wider/brighter rings; inactive handles tinted and thinner.
 - On-canvas keyboard hint updates every redraw.
 
-**2. Post-cut-&-cap auto-revalidation (`_project_manager_gui.py`)**
-- Viewer writes `cutcap_report.json` sentinel on success; GUI detects it in
+**2. Post-cut-&-patch auto-revalidation (`_project_manager_gui.py`)**
+- Viewer writes `cutpatch_report.json` sentinel on success; GUI detects it in
   `_after_tunnel_viewer`, runs `repair_aligned`, then shows a good/bad popup.
-- `_after_cutcap_revalidated` reads `aligned_check.json` and surfaces residual
+- `_after_cutpatch_revalidated` reads `aligned_check.json` and surfaces residual
   issues or "All Clear" without requiring the user to re-open Inspect & Fix.
 
 **3. New-mesh import safety (`_project_manager_gui.py`, `project_store.py`)**
@@ -72,18 +123,18 @@ regression that this cleaning caused on degenerate tight-loop meshes.
   tree-cotree progenitor (already computed, no extra cost). Default unchanged.
 - `select_cut_loop` retries `dual_crossing_loop` on the loose progenitor when
   the tight-loop call returns `None` (guarded by `len(loose) > len(A)`).
-  Restores the green/red dual pair without touching tightening or cut/cap logic.
+  Restores the green/red dual pair without touching tightening or cut/patch logic.
 - Verified on `june_20` mesh: both loops (2.95 mm + 3.50 mm) appear, both sever
   `genus 1→0`, distinct vertex sets. All 11 tests pass; `test_vectorized_topo`
   ALL MATCH.
 
-**4. Cap quality improvements (`tunnel_loop_extractor.py`)**
-- `cut_and_cap` / `cut_and_cap_loops` switch from `meshing_close_holes` to
+**4. patch quality improvements (`tunnel_loop_extractor.py`)**
+- `cut_and_patch` / `cut_and_patch_loops` switch from `meshing_close_holes` to
   **pymeshfix** for hole filling — cleaner caps on complex tunnel geometries.
 - `_remesh_selected_caps`: new helper; retessellates freshly-capped faces + a
   dilated halo to a uniform ~1.5 mm edge length (isotropic explicit remeshing).
   Runs between the pymeshfix fill and the Taubin smooth step. Silently no-ops on
-  any PyMeshLab failure (cap is topologically valid at that point regardless).
+  any PyMeshLab failure (patch is topologically valid at that point regardless).
 - Taubin smoothing params tuned: `smooth_iters=5, taubin_lambda=0.4, taubin_mu=0.2`
   (previously 3 / 0.5 / −0.53).
 
@@ -118,24 +169,24 @@ tracks inspection state reliably across re-align and viewer-exit events.
 - `_watch_viewer(proc, on_close)` — polls the detached viewer process and calls
   `_check_aligned_quality_result` (or `_check_mesh_quality_result`) on close.
   Inspect button restyles to "done" automatically after a successful in-app cut
-  & cap with no manual refresh needed.
+  & patch with no manual refresh needed.
 - Align renamed to "1. Align Mesh"; step labels renumbered 1–7.
 
 **3. Tunnel viewer rewrite (`mesh_problem_viewer.py`)**
 - Qt+QThread window: appears immediately with base mesh + fast overlays; cut-loop
   computation runs in a background QThread with a progress bar overlay.
-- `TunnelSelector.apply_cut_and_cap()` — one-click "Apply Cut & Cap  [C]":
-  runs `cut_and_cap_loops`, saves over `aligned_head.ply`, refreshes
+- `TunnelSelector.apply_cut_and_patch()` — one-click "Apply Cut+Patch  [C]":
+  runs `cut_and_patch_loops`, saves over `aligned_head.ply`, refreshes
   `aligned_check.json`. Falls back to exported loops (manual Blender) on failure;
   original file is never left in a bad state.
 - `compute_tunnel_data` / `render_tunnel_data` split the old monolithic
   `add_tunnel_overlay` so the background worker stays VTK-free.
 
-**4. In-app cut & cap (`tunnel_loop_extractor.py`)**
-- `cut_and_cap(pts, faces, loop_verts)` — deletes the 1-ring band, caps holes
+**4. In-app Cut+Patch (`tunnel_loop_extractor.py`)**
+- `cut_and_patch(pts, faces, loop_verts)` — deletes the 1-ring band, caps holes
   with PyMeshLab `meshing_close_holes`, verifies genus drops by exactly one,
-  applies Taubin smoothing on the cap boundary.
-- `cut_and_cap_loops(pts, faces, loops)` — batched variant for multi-handle
+  applies Taubin smoothing on the patchboundary.
+- `cut_and_patch_loops(pts, faces, loops)` — batched variant for multi-handle
   meshes; all bands deleted before any re-indexing.
 - `_topo_counts(faces)` — vectorized numpy/scipy topology, replacing NetworkX
   graph rebuilds (~3-4x faster; torture mesh 2: ~51 s -> ~16 s).

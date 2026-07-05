@@ -15,6 +15,24 @@ from collections import defaultdict, deque
 # both drown in ear-fold noise).
 # ---------------------------------------------------------------------------
 
+# --- LOOP STYLING ---
+COLOR_CUT_ACTIVE = "#F01818"
+COLOR_CUT_INACTIVE = "#CC6161"
+COLOR_IGNORE_ACTIVE = "#546EB0" 
+COLOR_IGNORE_INACTIVE = "#7483B0"
+COLOR_MESH = "#AFA79C"
+
+# --- OTHER COLORS
+COLOR_PALE_YELLOW = "#e6d79f"
+COLOR_PALE_GREEN = "#9fe6bf"
+COLOR_CANVAS_HINT = "#DDDDDD" 
+
+# --- MESH SETTINGS ---
+MESH_OPACITY = 1
+MESH_DIFFUSE = .7
+MESH_AMBIENT = 0.4
+MESH_SPECULAR = .15
+
 def _topological_tunnel_loops(pv_mesh, genus, *, max_pins=5):
     """
     Find topological tunnel/handle loops via the tree-cotree homology method.
@@ -334,12 +352,18 @@ class TunnelSelector:
     """Interactive cut-loop chooser.
 
     Each handle has up to two candidate cut loops (the dual pair). One is shown
-    as GREEN 'Cut here', the other RED 'Avoid'. Clicking near a loop makes it the
+    as RED 'Cut and Patch Tunnel', the other BLUE 'Ignore'. Clicking near a loop makes it the
     chosen cut loop for its handle; the chosen loops are re-exported on every
-    change. The initial (suggested) choice comes from select_cut_loop, but since
-    that auto-classifier is NOT reliable across meshes, the user is expected to
-    confirm / override by clicking -- the suggestion is a starting point only.
+    change. Each loop carries its topological HANDLE/TUNNEL label from
+    select_cut_loop's linking-number classifier (reliable — settled 2026-07-04):
+    TUNNEL = cutting fills the see-through channel flush; HANDLE = cutting
+    severs the solid bridge (funnel). The TUNNEL loop is pre-selected, but which
+    one is the RIGHT cut depends on which side is the scan artifact — so the
+    user confirms or toggles before applying.
     """
+
+    _LABEL_TEXT = {"TUNNEL": "TUNNEL: fills channel flush",
+                   "HANDLE": "HANDLE: severs solid bridge"}
 
     def __init__(self, plotter, pts, pairs, mesh_path=None, faces=None,
                  on_success=None):
@@ -347,16 +371,19 @@ class TunnelSelector:
         self.pts = np.asarray(pts)
         self.faces = None if faces is None else np.asarray(faces)
         self.mesh_path = mesh_path
-        self.on_success = on_success  # callable: invoked after a successful cut & cap
+        self.on_success = on_success  # callable: invoked after a successful Cut+Patch
         self.center = self.pts.mean(0)
         self.diag = float(np.linalg.norm(self.pts.max(0) - self.pts.min(0)))
         self.active = 0             # keyboard-active handle index (Task 4)
-        self.handles = []           # each: {"loops": [idx arrays], "sel": int}
+        self.handles = []           # each: {"loops": [idx arrays], "labels": [str], "sel": int}
         for pr in pairs:
+            pr_labels = pr.get("labels") or {}
             loops = [np.asarray(pr["cut"])]
+            labels = [pr_labels.get("cut") or "UNKNOWN"]
             if pr.get("avoid") is not None:
                 loops.append(np.asarray(pr["avoid"]))
-            self.handles.append({"loops": loops, "sel": 0})
+                labels.append(pr_labels.get("avoid") or "UNKNOWN")
+            self.handles.append({"loops": loops, "labels": labels, "sel": 0})
         self.export_txt = None
         self.redraw()
         self.export()
@@ -431,32 +458,35 @@ class TunnelSelector:
                 is_cut = (li == sel)
                 # Active handle: wider rings so it stands out from inactive ones.
                 if is_active:
-                    width = 9 if is_cut else 5
+                    width = 20 if is_cut else 10
                 else:
                     # Inactive handles: draw dimmer/thinner so the active one
                     # is visually dominant.
-                    width = 5 if is_cut else 3
-
-                color = 'lime' if is_cut else 'red'
+                    width = 10 if is_cut else 5
+                """Handle Colors. Cut color, then ignore color"""
+                color = COLOR_CUT_ACTIVE if is_cut else COLOR_IGNORE_ACTIVE
                 if not is_active:
                     # Tint inactive handles slightly different to cue "not focused".
-                    color = '#66cc66' if is_cut else '#cc6666'
+                    color = COLOR_CUT_INACTIVE if is_cut else COLOR_IGNORE_INACTIVE
 
                 _draw_loop(self.pl, self.pts[lp], color,
                            f'sel_loop_{hi}_{li}', width=width)
 
-            # Cut-loop label for this handle.
+            # Cut-loop label for this handle (with its HANDLE/TUNNEL role).
             cc = self.pts[cut_lp].mean(0)
-            cut_label = 'Cut here' if not is_active else (
-                f'Cut here  [active {hi + 1}/{n_handles}]'
-                if n_handles > 1 else 'Cut here  [Space=toggle, C=apply]'
+            cut_label = 'Cut+Patch Here' if not is_active else (
+                f'Cut+Patch Here:  [active {hi + 1}/{n_handles}]'
+                if n_handles > 1 else 'Cut+Patch Here  [Space=toggle, C=apply]'
             )
+            role = self._LABEL_TEXT.get(h["labels"][sel])
+            if role:
+                cut_label += '\n' + role
             _add_labels_with_leaders(
                 self.pl, [cc], [_label_anchor(cc, self.center, self.diag, +1)],
-                [cut_label], 'lime' if is_active else '#66cc66',
+                [cut_label], COLOR_CUT_ACTIVE if is_active else COLOR_CUT_INACTIVE,
                 f'sel_cut_lbl_{hi}')
 
-            # Avoid-loop labels.
+            # Avoid-loop labels (with their HANDLE/TUNNEL roles).
             at, aa, al = [], [], []
             for li, lp in enumerate(h["loops"]):
                 if li == sel:
@@ -464,20 +494,21 @@ class TunnelSelector:
                 ac = self.pts[lp].mean(0)
                 at.append(ac)
                 aa.append(_label_anchor(ac, self.center, self.diag, -1))
-                al.append('Avoid')
+                role = self._LABEL_TEXT.get(h["labels"][li])
+                al.append('Avoid' + ('\n' + role if role else ''))
             _add_labels_with_leaders(self.pl, at, aa, al,
-                                     'red' if is_active else '#cc6666',
+                                     COLOR_IGNORE_ACTIVE if is_active else COLOR_IGNORE_INACTIVE,
                                      f'sel_avoid_lbl_{hi}')
 
         # On-canvas keyboard hint (update every redraw so it stays current).
         if n_handles > 1:
             hint = (f"Active handle: {self.active + 1}/{n_handles}  "
-                    f"[Tab=next  Space=toggle  C=apply cut & cap]")
+                    f"[Tab=Next pair  Space=Toggle  C=Cut+Patch]")
         else:
-            hint = "Space=toggle loop  C=apply cut & cap  drag=rotate"
+            hint = "Space=Toggle  C=Cut+Patch hole  drag=Rotate camera"
         try:
             self.pl.add_text(hint, position="lower_right", font_size=9,
-                             color="#9fe6a0", name="kb_hint")
+                             color=COLOR_CANVAS_HINT, name="kb_hint")
         except Exception:
             pass
 
@@ -500,25 +531,25 @@ class TunnelSelector:
     def _status(self, text, color):
         try:
             self.pl.add_text(text, position="upper_right", font_size=10,
-                             color=color, name="capstatus")
+                             color=color, name="patchstatus")
             self.pl.render()
         except Exception:
             pass
 
-    def apply_cut_and_cap(self):
-        """Delete the chosen cut loops' bands and cap the holes in-app, producing
+    def apply_cut_and_patch(self):
+        """Delete the chosen cut loops' bands and patch the holes in-app, producing
         a watertight genus-0 mesh. Saves over mesh_path, writes a sentinel
-        cutcap_report.json so the GUI can trigger auto re-inspect + repair, then
+        cutpatch_report.json so the GUI can trigger auto re-inspect + repair, then
         calls self.on_success() to close the viewer. Falls back to the exported
         loops (manual Blender) on any failure, leaving the original file untouched."""
         if self.faces is None or not self.mesh_path:
-            self._status("Cut & cap unavailable (no mesh data)", "#e6a09f")
+            self._status("Cut+Patch unavailable (no mesh data)", COLOR_CUT_INACTIVE)
             return
         try:
-            from tunnel_loop_extractor import cut_and_cap_loops
+            from tunnel_loop_extractor import cut_and_patch_loops
             cut_loops = [h["loops"][h["sel"]] for h in self.handles]
-            self._status("Applying cut & cap...", "#e6d79f")
-            new_pts, new_faces = cut_and_cap_loops(self.pts, self.faces, cut_loops)
+            self._status("Repairing mesh tunnels...", COLOR_PALE_YELLOW)
+            new_pts, new_faces = cut_and_patch_loops(self.pts, self.faces, cut_loops)
 
             faces_pv = np.hstack(
                 [np.full((len(new_faces), 1), 3, dtype=np.int64),
@@ -526,21 +557,21 @@ class TunnelSelector:
             out = pv.PolyData(new_pts, faces_pv)
             out.save(self.mesh_path)
 
-            # Write a sentinel file so the GUI knows cut & cap ran (not just
+            # Write a sentinel file so the GUI knows Cut+Patch ran (not just
             # that the viewer was closed). The GUI picks this up via
             # _after_tunnel_viewer() and runs repair_aligned automatically.
             import json as _json
             sentinel = os.path.join(os.path.dirname(self.mesh_path),
-                                    "cutcap_report.json")
+                                    "cutpatch_report.json")
             with open(sentinel, "w") as _f:
                 _json.dump({"applied": True,
                             "mesh": os.path.basename(self.mesh_path)}, _f)
 
-            self._status("Tunnel removed — closing and re-validating…", "#9fe6a0")
-            print("[tunnel] cut & cap applied; mesh saved watertight (genus 0).",
+            self._status("Tunnel removed — closing and re-validating…", COLOR_PALE_GREEN)
+            print("[tunnel] Cut+Patch applied; mesh saved watertight (genus 0).",
                   flush=True)
 
-            # Auto-close so the GUI can run the post-cap re-inspect + repair.
+            # Auto-close so the GUI can run the post-patch re-inspect + repair.
             if callable(self.on_success):
                 try:
                     self.on_success()
@@ -548,10 +579,10 @@ class TunnelSelector:
                     print(f"[tunnel] on_success callback failed: {e}", file=sys.stderr)
         except Exception as e:
             self._status(
-                f"Auto cut & cap failed: {e}\n"
+                f"Auto Cut+Patch failed: {e}\n"
                 "Use the exported loop for a manual Blender cut instead.",
                 "#e6a09f")
-            print(f"[tunnel] cut & cap failed: {e}", file=sys.stderr)
+            print(f"[tunnel] Cut+Patch failed: {e}", file=sys.stderr)
 
 
 def _mesh_to_arrays(pv_mesh):
@@ -601,7 +632,7 @@ def render_tunnel_data(plotter, data, mesh_path=None, on_success=None):
     n_loops, focus, selector) or False if nothing to draw.
 
     on_success: optional callable forwarded to TunnelSelector — called when
-    cut & cap succeeds so the hosting window can close itself and trigger GUI
+    Cut+Patch succeeds so the hosting window can close itself and trigger GUI
     re-validation.
     """
     mode = data.get("mode")
@@ -628,7 +659,7 @@ def render_tunnel_data(plotter, data, mesh_path=None, on_success=None):
         pins = [pts[lp].mean(0) for lp in idx_loops]
         for i, loop_pts in enumerate(loops):
             _draw_loop(plotter, loop_pts, 'magenta', f'tunnel_loop_{i}')
-        _add_labels(plotter, pins, ['Cut here'] * len(pins), 'magenta', 'tunnel_labels')
+        _add_labels(plotter, pins, ['Cut+Patch Here'] * len(pins), 'magenta', 'tunnel_labels')
         plotter.render()
         return {"rendered": True, "tight": True, "export_txt": export_txt,
                 "n_loops": len(loops),
@@ -703,8 +734,8 @@ def _add_static_overlays(pl, mesh, mesh_path):
                                          consistent_normals=True, inplace=False)
     except Exception:
         mesh_disp = mesh
-    pl.add_mesh(mesh_disp, color="#a0c4ff", opacity=0.65, show_edges=False,
-                ambient=0.35, diffuse=0.6, specular=0.05, name="surface")
+    pl.add_mesh(mesh_disp, color="#C8B69F", opacity=MESH_OPACITY, show_edges=False,
+                ambient=MESH_AMBIENT, diffuse=MESH_DIFFUSE, specular=MESH_SPECULAR, name="surface")
 
     legend_lines = []
     try:
@@ -726,7 +757,7 @@ def _add_static_overlays(pl, mesh, mesh_path):
                      if labeled.n_points > 0 else 1)
         if n_regions > 1:
             pl.add_mesh(labeled, scalars="RegionId", cmap="tab10",
-                        opacity=0.7, show_scalar_bar=False, name="components")
+                        opacity=MESH_OPACITY, show_scalar_bar=False, name="components")
             legend_lines.append(f"Colours: {n_regions} disconnected components")
         else:
             legend_lines.append("[OK] Single connected component")
@@ -750,7 +781,7 @@ def _add_static_overlays(pl, mesh, mesh_path):
                         if ms.current_mesh().face_is_selected(i)]
             si_mesh = mesh.extract_cells(face_ids) if face_ids else None
             if si_mesh and si_mesh.n_points > 0:
-                pl.add_mesh(si_mesh, color="yellow", opacity=0.85, name="si_faces")
+                pl.add_mesh(si_mesh, color="yellow", opacity=MESH_OPACITY, name="si_faces")
                 legend_lines.append(f"Yellow faces: {n_si} self-intersection(s)")
         else:
             legend_lines.append("[OK] No self-intersecting faces")
@@ -761,7 +792,7 @@ def _add_static_overlays(pl, mesh, mesh_path):
 
 
 def _enable_loop_keys(pl, selector):
-    """Wire keyboard controls for loop selection and cut & cap.
+    """Wire keyboard controls for loop selection and Cut+Patch.
 
     Left-click is intentionally NOT wired for selection — it reverts to pure
     camera rotation, eliminating the fight between drag-rotate and pick-select.
@@ -769,13 +800,13 @@ def _enable_loop_keys(pl, selector):
     Keyboard layout (routed through the Qt eventFilter on the window):
       Tab / Shift+Tab — cycle handles           (genus > 1 only)
       Space           — toggle cut loop in the active pair
-      C               — Apply Cut & Cap
+      C               — Apply Cut+Patch
 
     The Tab/Space keys are intercepted at the Qt level (see _ProblemViewerWindow
     eventFilter) so they never reach pyvista's VTK key handler or Qt's focus
     traversal. C stays here on the pyvista key event for compatibility.
     """
-    pl.add_key_event('c', lambda: selector.apply_cut_and_cap())
+    pl.add_key_event('c', lambda: selector.apply_cut_and_patch())
 
 
 def view_mesh_problems(mesh_path):
@@ -784,7 +815,7 @@ def view_mesh_problems(mesh_path):
       - Red lines    : boundary / non-manifold edges
       - Colour bands : disconnected components
       - Yellow faces : self-intersecting faces (requires pymeshlab)
-      - Green/red rings : topological tunnel cut loops (genus > 0)
+      - Red/blue rings : topological tunnel cut loops (genus > 0)
 
     The window appears immediately with the base mesh + the fast overlays, and a
     progress bar runs while the (slow) cut-loop computation happens in a worker
@@ -905,10 +936,10 @@ def _build_qt_classes():
             panel_layout.addWidget(lbl_title)
 
             lbl_instr = QtWidgets.QLabel(
-                "Space — toggle cut loop in active pair\n"
-                "Tab / Shift+Tab — cycle handles (genus > 1)\n"
-                "C — apply Cut & Cap\n"
-                "Drag — rotate camera (no click conflict)")
+                "Space — toggle selected loop in active pair\n"
+                "Tab / Shift+Tab — cycle to next loop pair (genus > 1)\n"
+                "C — Apply Cut+Patch\n"
+                "Click & Drag — Rotate camera")
             lbl_instr.setWordWrap(True)
             lbl_instr.setStyleSheet(f"color: #aaa; font-size: 11px; background: transparent;")
             panel_layout.addWidget(lbl_instr)
@@ -921,7 +952,7 @@ def _build_qt_classes():
 
             panel_layout.addStretch()
 
-            self._btn_cut = QtWidgets.QPushButton("Apply Cut && Cap  [C]")
+            self._btn_cut = QtWidgets.QPushButton("Apply Cut+Patch  [C]")
             self._btn_cut.setEnabled(False)
             panel_layout.addWidget(self._btn_cut)
 
@@ -1036,17 +1067,17 @@ def _build_qt_classes():
                 sel = self._selector
                 _enable_loop_keys(self.plotter, sel)
                 self._btn_cut.setEnabled(True)
-                self._btn_cut.clicked.connect(sel.apply_cut_and_cap)
+                self._btn_cut.clicked.connect(sel.apply_cut_and_patch)
                 self._btn_export.setEnabled(True)
                 self._btn_export.clicked.connect(sel.export)
                 msg = (f"{found['n_loops']} tunnel/handle(s) — dual pair shown. "
-                       "GREEN = cut, RED = avoid. "
-                       "Space=toggle, Tab=next handle, C=apply cut & cap.")
+                       "RED = patch, BLUE = ignore. "
+                       "Space=toggle, Tab=next handle, C=apply Cut+Patch.")
                 if found.get("export_txt"):
                     msg += f" Exported: {os.path.basename(found['export_txt'])}"
                 self.legend_lines.append(msg)
                 self.status_label.setText(
-                    "Space=toggle cut loop  Tab=next handle  C=apply cut & cap")
+                    "Space=toggle cut loop  Tab=next handle  C=apply Cut+Patch")
                 self._panel_status.setText(
                     f"{found['n_loops']} tunnel(s) found.\n"
                     "Space=toggle  Tab=next handle  C=apply")

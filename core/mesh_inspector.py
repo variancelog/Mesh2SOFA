@@ -39,7 +39,7 @@ from project_store import ProjectStore, MESH_ALIGNED, MESH_GRADED
 #     pymeshfix.MeshFix.repair(), then saves the result with pymeshlab.
 #     Fixes: self-intersections, non-manifold edges/vertices, open boundaries.
 #     Preserves genus — topological tunnels (genus > 0) survive and must be
-#     removed separately by the cut+cap step in mesh_problem_viewer.py.
+#     removed separately by the cut+patch step in mesh_problem_viewer.py.
 #
 #   Fallback engine — pymeshlab filter chain (used if pymeshfix errors):
 #     1. meshing_remove_duplicate_vertices
@@ -66,7 +66,7 @@ from project_store import ProjectStore, MESH_ALIGNED, MESH_GRADED
 #   3. pymeshfix repair (primary) / pymeshlab filter chain (fallback).
 #        Fixes self-intersections, non-manifold edges/vertices, open holes.
 #        Genus (topological tunnels) is preserved — tunnels cannot be removed
-#        until the mesh is aligned (Step 2 cut & cap in mesh_problem_viewer.py).
+#        until the mesh is aligned (Step 2 Cut+Patch in mesh_problem_viewer.py).
 #   4. Re-inspect the cleaned mesh → write import_report.json.
 #
 #   Genus/tunnel warnings at import are warn-only (exit 0).  They are flagged
@@ -335,7 +335,7 @@ def format_report(report):
 def _is_tunnel_issue(issue_text):
     """True if a critical issue describes a topological tunnel/handle (genus>0).
 
-    Tunnels are not fixable by geometric repair (only a cut+cap removes them), so
+    Tunnels are not fixable by geometric repair (only a cut+patch removes them), so
     a cleaned-but-genus>0 mesh is still a *successful* geometric repair — it just
     needs the tunnel-loop step next. Mirrors the wording used in align_head.py.
     """
@@ -395,7 +395,7 @@ def repair_mesh(in_path, out_path):
     Never overwrites in_path.
 
     success = no critical issues remain OTHER than topological tunnels (genus>0),
-    which are removed in the separate tunnel-loop / cut+cap step.
+    which are removed in the separate tunnel-loop / cut+patch step.
     """
     before = inspect_mesh(in_path)
 
@@ -429,8 +429,9 @@ def _run_blender_dissolve(in_path, out_path, blender_exe, dist):
         dist:        Merge distance in mesh units (already unit-scaled by caller,
                      equals MERGE_FIX_THRESH × unit_scale).
     """
-    scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    cleanup_script = os.path.join(scripts_dir, "blender_scripts", "bmesh_cleanup.py")
+    core_dir = os.path.dirname(os.path.abspath(__file__))            # .../core
+    repo_root = os.path.dirname(core_dir)                            # repo root
+    cleanup_script = os.path.join(repo_root, "blender_scripts", "bmesh_cleanup.py")
 
     cmd = [
         blender_exe,
@@ -453,7 +454,7 @@ def import_mesh(dest_path, blender_exe):
 
     success semantics: Blender merge-by-distance failure raises (hard-require). A
     surviving genus (topological tunnel) is warn-only — the import still succeeds
-    because tunnels can only be fixed post-align via the cut & cap step.
+    because tunnels can only be fixed post-align via the Cut+Patch step.
     """
     def log(msg):
         print(msg, flush=True)
@@ -622,7 +623,7 @@ def repair_aligned(mesh_dir):
     Repair aligned_head.ply in place (pymeshfix primary), then rewrite
     aligned_check.json from a fresh inspection. Geometry criticals (self-
     intersections, non-manifold, boundaries) are fixed; topological tunnels
-    remain critical and are handled by the cut+cap / tunnel-loop step.
+    remain critical and are handled by the cut+patch / tunnel-loop step.
     Exits non-zero if any critical (incl. tunnels) remains.
     """
     def log(msg):
@@ -650,7 +651,7 @@ def repair_aligned(mesh_dir):
     report = inspect_mesh(orig)
     _write_aligned_check(mesh_dir, report)
     if report["severity"] == "critical":
-        log("[MESH_CHECK] Critical issues remain (tunnels require the cut+cap step).")
+        log("[MESH_CHECK] Critical issues remain (tunnels require the cut+patch step).")
         sys.exit(1)
     else:
         log("[MESH_CHECK] Aligned mesh is clean. You may proceed to grading.")

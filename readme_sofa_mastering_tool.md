@@ -25,7 +25,7 @@ Ensure you have the following installed:
     ```bash
     pip install customtkinter tkinterdnd2-universal numpy scipy
     ```
-    *(Note: `generate_sofa_outputs.py` and `generate_extras.py` must be present in the same directory as the tool.)*
+    *(Note: the worker scripts `core/generate_sofa_outputs.py` and `core/generate_extras.py` must be present in the `core/` folder next to the tool.)*
 
 ## Usage
 

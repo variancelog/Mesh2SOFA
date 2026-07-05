@@ -149,7 +149,7 @@ class ProjectStore:
             self._check_path(MESH_ALIGNED),   # aligned_check.json
             self._check_path(MESH_GRADED),    # mesh_check.json
             # Step 2 sentinel + loop exports
-            os.path.join(md, "cutcap_report.json"),
+            os.path.join(md, "cutpatch_report.json"),
         ]
         # Step 3 graded meshes (e.g. Left_Graded.ply, Right_Graded.ply)
         candidates.extend(_glob.glob(os.path.join(md, "*_Graded.ply")))

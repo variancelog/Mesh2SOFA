@@ -1,10 +1,12 @@
+## General
+- look for architectural improvements
+- Move core scripts out of root.
+
 ## DFHRTF Outputs
 - Add new weighting mode from SOFA Buddy (accounts for measurement grids which lack low elevations)
 
-## SOFA Outputs
-- Remove 512 sample checkbox
+## SOFA Mastering Tool
+- Remove this now that SOFA Buddy is available?
 
 ## Mesh processing
-- use bpy/bmesh to run degenerate dissolve on mesh prior to inspect/clean step (setting of .3)
-- DONE: flow: degenerate dissolve > triangulate > pymeshfix.clean() > cut_and_cap > 
-- After initial cleaning, some small triangles are still left. opening inspect and fix to go to loop cutter warns you but doesn't fix the small triangles?
+- Add instructional images to explain how to identify the loop to cut & patch (for non-genus-one meshes)
