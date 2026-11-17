@@ -16,6 +16,7 @@ import unittest
 
 from project_store import (
     ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED,
+    RESOLUTION_MODES, resolution_mode,
 )
 
 
@@ -272,6 +273,17 @@ class Resolution(unittest.TestCase):
     def test_default_when_file_missing(self):
         with tempfile.TemporaryDirectory() as root:
             self.assertEqual(ProjectStore(root).resolution(), "standard")
+
+    def test_hires_passes_through(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write_json(os.path.join(root, "project.json"),
+                        {"project_resolution": "hires"})
+            self.assertEqual(ProjectStore(root).resolution(), "hires")
+
+    def test_resolution_mode_lookup(self):
+        self.assertEqual(resolution_mode("hires")["max_hz"], 20000)
+        self.assertEqual(resolution_mode("hires")["step_hz"], 100)
+        self.assertIs(resolution_mode("bogus"), RESOLUTION_MODES["standard"])
 
 
 if __name__ == "__main__":

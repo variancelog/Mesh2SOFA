@@ -1,26 +1,37 @@
+import json
 import os
 import sys
 import subprocess
 
-from project_store import ProjectStore
-
 CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
+
+def read_test_index(project_dir):
+    """(index, freq_hz) of the highest exported frequency, read from the
+    Mesh2HRTF <project_dir>/parameters.json. Raises on a missing/unreadable
+    file so the test never runs against a guessed index."""
+    params_path = os.path.join(project_dir, "parameters.json")
+    with open(params_path, "r") as fh:
+        params = json.load(fh)
+    freqs = params.get("frequencies") or []
+    n = params.get("numFrequencies") or len(freqs)
+    if not n:
+        raise ValueError(f"no frequencies in {params_path}")
+    return int(n), (freqs[-1] if freqs else None)
+
 
 def run_test(project_dir, numcalc_exe):
     print(f"\n--- Testing Project: {os.path.basename(project_dir)} ---")
 
-    # 1. Determine Test Index based on Resolution
-    # project_dir is typically ".../Exports/Left_Project"; the <=3-level walk
-    # reaches the project root that holds project.json.
-    store = ProjectStore.locate(project_dir)
-    resolution = store.resolution() if store else "standard"
-
-    if resolution == "lowres":
-        test_idx = "107" # Lowres (16.05kHz)
-        print("   [Mode] Lowres Detected (Target Index: 107)")
-    else:
-        test_idx = "120" # Default Standard (18kHz)
-        print("   [Mode] Standard Detected (Target Index: 120)")
+    # 1. Test the highest frequency in the export (index is 1-based in NumCalc)
+    try:
+        idx, freq = read_test_index(project_dir)
+    except Exception as e:
+        print(f"[ERROR] Cannot read the export's parameters.json ({e}). "
+              "Re-export the project from Blender.")
+        return False
+    test_idx = str(idx)
+    print(f"   [i] Target Index: {test_idx} ({freq} Hz)")
 
     # 2. Target Directory
     source_dir = os.path.join(project_dir, "NumCalc", "source_1")

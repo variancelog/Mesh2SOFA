@@ -43,7 +43,7 @@ def run_processing(aligned_mesh_path, grading_bin_path):
         grad_ratio = "0.30"
         target_mm_base = 1.0
     else:
-        log("   [MODE] Standard (Max 18kHz) selected.")
+        log(f"   [MODE] {resolution}: Standard mesh settings")
         arg_min = "0.5"
         arg_max = "10.0"
         grad_ratio = "0.20"

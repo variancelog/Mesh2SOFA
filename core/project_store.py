@@ -24,6 +24,22 @@ import os
 from enum import Enum
 
 
+# Project resolution modes (project_resolution in project.json). The frequency
+# range lives here; mesh-grading args stay in process_and_grade.py.
+# Keep (max_hz, step_hz) in sync with RESOLUTION_MODES in
+# blender_scripts/mesh2SOFA_blender_addon.py (tests/test_resolution_modes.py checks it).
+RESOLUTION_MODES = {
+    "lowres":   {"max_hz": 16050, "step_hz": 150, "label": "Lowres (16 kHz Max)",   "double_length": False},
+    "standard": {"max_hz": 18000, "step_hz": 150, "label": "Standard (18 kHz Max)", "double_length": False},
+    "hires":    {"max_hz": 20000, "step_hz": 100, "label": "HiRes (20 kHz Max)",    "double_length": True},
+}
+
+
+def resolution_mode(name):
+    """Settings dict for a project_resolution name; unknown -> standard."""
+    return RESOLUTION_MODES.get(name, RESOLUTION_MODES["standard"])
+
+
 class CleanState(Enum):
     CLEAN = "clean"          # check file present, no critical entry
     CRITICAL = "critical"    # check file present, >=1 critical entry
@@ -109,8 +125,9 @@ class ProjectStore:
         return self.load_project().get(key, default)
 
     def resolution(self):
-        """Raw project_resolution string; default 'standard'. The number mapping
-        (max_freq / remesh args / NumCalc index) stays in the callers."""
+        """Raw project_resolution string; default 'standard'. Use
+        resolution_mode() for the frequency settings; remesh args stay in
+        process_and_grade.py."""
         return self.load_project().get("project_resolution", "standard")
 
     # --- writes (envelope + format owned here; severity/counts computed by caller) ---

@@ -15,7 +15,8 @@ CORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core")
 if CORE_DIR not in sys.path:
     sys.path.insert(0, CORE_DIR)
 
-from project_store import ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED
+from project_store import (ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED,
+                           RESOLUTION_MODES, resolution_mode)
 
 # Hide the console window so running as .py looks like .pyw (no terminal).
 # A real (hidden) console still exists, so child processes (e.g. NumCalc.exe)
@@ -26,6 +27,30 @@ if sys.platform == 'win32':
         ctypes.windll.user32.ShowWindow(_hwnd, 0)  # SW_HIDE
 
 CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
+
+def describe_export_boundary(project_dir):
+    """One-line description of the boundary condition written to a Mesh2HRTF
+    export (set in the Blender add-on), read from NumCalc/source_1/NC.inp."""
+    nc_inp = os.path.join(project_dir, "NumCalc", "source_1", "NC.inp")
+    try:
+        with open(nc_inp, "r", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return "unknown (NC.inp not found)"
+    if not any(l.strip() == "BOUNDARY" for l in lines):
+        return "unknown (NC.inp incomplete)"
+    admi, current = [], None
+    for line in lines:
+        line = line.strip()
+        if line.startswith("# Material:"):
+            current = line[len("# Material:"):].strip()
+        elif line.startswith("ELEM") and " ADMI " in f" {line} ":
+            admi.append(current or "unnamed")
+            current = None
+    if not admi:
+        return "rigid"
+    return "admittance on " + ", ".join(admi)
 
 # Appearance Settings
 ctk.set_appearance_mode("Dark")
@@ -409,7 +434,7 @@ class HRTFProjectManager(ctk.CTk):
         # Data State
         self.project_data = {
             "base_path": "",
-            "project_resolution": "standard", # Default: standard or lowres
+            "project_resolution": "standard", # Default: standard | lowres | hires
             "scripts_path": os.path.dirname(os.path.abspath(__file__)),       
             "eval_grid": "",                   
             "raw_scan": "",
@@ -482,10 +507,8 @@ class HRTFProjectManager(ctk.CTk):
         # (intentionally not gridded — kept hidden as the base-path store)
 
         # Resolution mode toggle (replaces the old Project Folder row)
-        _MODE_LABELS = {
-            "standard": "Standard (18 kHz Max)",
-            "lowres":   "Lowres (16 kHz Max)",
-        }
+        _MODE_LABELS = {k: RESOLUTION_MODES[k]["label"]
+                        for k in ("lowres", "standard", "hires")}
         self._mode_label_to_value = {v: k for k, v in _MODE_LABELS.items()}
         self._mode_value_to_label = _MODE_LABELS
 
@@ -591,8 +614,11 @@ class HRTFProjectManager(ctk.CTk):
             self.is_running = True
             self.btn_stop.configure(state="normal")
             try:
+                # stdin=DEVNULL: a worker that prompts with input() must fail
+                # fast instead of waiting forever on the GUI's hidden console.
                 self.current_process = subprocess.Popen(
-                    cmd_list, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    cmd_list, cwd=cwd, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1, universal_newlines=True, shell=shell, creationflags=CREATE_NO_WINDOW
                 )
                 for line in iter(self.current_process.stdout.readline, ''):
@@ -631,7 +657,8 @@ class HRTFProjectManager(ctk.CTk):
                     self.log_queue.put(f"--> Starting: {desc}...")
                     
                     self.current_process = subprocess.Popen(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        cmd, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, bufsize=1, universal_newlines=True, creationflags=CREATE_NO_WINDOW
                     )
                     
@@ -718,13 +745,18 @@ class HRTFProjectManager(ctk.CTk):
     def _attach_mode_tooltips(self):
         """Bind tooltips to each internal segment button after they are rendered."""
         _tips = {
-            "Standard (18 kHz Max)": (
+            RESOLUTION_MODES["standard"]["label"]: (
                 "Standard mode: outputs up to 18 kHz.\n"
                 "Higher mesh resolution — requires more RAM and longer NumCalc simulation time."
             ),
-            "Lowres (16 kHz Max)": (
+            RESOLUTION_MODES["lowres"]["label"]: (
                 "Lowres mode: outputs up to 16 kHz.\n"
                 "Lower mesh resolution — uses less RAM and runs faster."
+            ),
+            RESOLUTION_MODES["hires"]["label"]: (
+                "HiRes mode: outputs up to 20 kHz in 100 Hz steps, 512-sample SOFAs.\n"
+                "Same mesh as Standard — 18–20 kHz accuracy is experimental.\n"
+                "~2× NumCalc time, more RAM at top frequencies."
             ),
         }
         try:
@@ -1068,7 +1100,7 @@ class HRTFProjectManager(ctk.CTk):
         self.entry_grid.configure(state="disabled")
         # Sync resolution toggle
         res = d.get("project_resolution", "standard")
-        self.seg_mode.set(self._mode_value_to_label.get(res, "Standard (18 kHz Max)"))
+        self.seg_mode.set(self._mode_value_to_label.get(res, RESOLUTION_MODES["standard"]["label"]))
         self.update_workflow_state()
 
     def load_project_json(self):
@@ -1561,7 +1593,11 @@ class HRTFProjectManager(ctk.CTk):
         if not numcalc_exe: return self.log("[ERROR] NumCalc.exe not found.")
 
         res_mode = self.project_data.get("project_resolution", "standard")
-        freq_label = "16 kHz" if res_mode == "lowres" else "18 kHz"
+        freq_label = f"{resolution_mode(res_mode)['max_hz'] / 1000:g} kHz"
+
+        if not self._check_export_matches_mode(res_mode):
+            self.log("--> NumCalc cancelled (export does not match the project mode).")
+            return
 
         def on_choice(action):
             if action == "test":
@@ -1571,6 +1607,45 @@ class HRTFProjectManager(ctk.CTk):
 
         NumCalcOptionsDialog(self, freq_label, on_choice)
 
+    def _check_export_matches_mode(self, res_mode):
+        """Compare the Blender export's frequency range (both ears'
+        parameters.json) with the project mode. Always logs what it found; on a
+        mismatch asks warn-but-allow. Returns False only if the user cancels."""
+        mode = resolution_mode(res_mode)
+        mode_name = mode["label"].split(" (")[0]
+        want = f"{mode['max_hz'] / 1000:g} kHz / {mode['step_hz']:g} Hz"
+        base_folder = os.path.normpath(self.entry_base.get())
+        found, mismatched = [], []
+        for side in ("Left", "Right"):
+            params_path = os.path.join(base_folder, "Exports", f"{side}_Project", "parameters.json")
+            try:
+                with open(params_path, "r") as fh:
+                    params = json.load(fh)
+                max_hz = float(params["maxFrequency"])
+                step_hz = float(params["frequencyStepSize"])
+            except OSError:
+                found.append(f"{side}: parameters.json not found")
+                continue
+            except (ValueError, KeyError, TypeError) as e:
+                found.append(f"{side}: parameters.json unreadable ({e})")
+                continue
+            got = f"{max_hz / 1000:g} kHz / {step_hz:g} Hz"
+            found.append(f"{side}: {got}")
+            if abs(max_hz - mode["max_hz"]) > 0.5 or abs(step_hz - mode["step_hz"]) > 0.5:
+                mismatched.append(f"{side} export is {got}")
+
+        self.log(f"[i] Export frequency range: {'; '.join(found)} (project mode {mode_name}: {want})")
+        if not mismatched:
+            return True
+        return messagebox.askyesno(
+            "Export does not match project mode",
+            f"{'; '.join(mismatched)}, but the project mode is {mode_name} ({want}).\n\n"
+            "Delete Exports/Left_Project and Exports/Right_Project and re-export from "
+            "Blender (Mesh2HRTF will not overwrite an existing export). If it still "
+            "mismatches, reinstall the Mesh2SOFA add-on in Blender.\n\n"
+            "Run NumCalc on the current export anyway?",
+            icon="warning", parent=self)
+
     def _run_numcalc_test(self, numcalc_exe, freq_label):
         base_folder = os.path.normpath(self.entry_base.get())
         left_proj   = os.path.join(base_folder, "Exports", "Left_Project")
@@ -1578,6 +1653,7 @@ class HRTFProjectManager(ctk.CTk):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
         test_script = os.path.join(CORE_DIR, "run_numcalc_test.py")
 
+        self.log(f"[i] Boundary condition in export: {describe_export_boundary(left_proj)}")
         self.log(f"--> Running Stability Test on both ears ({freq_label})...")
         cmd_left  = [sys.executable, "-u", test_script, left_proj,  numcalc_exe]
         cmd_right = [sys.executable, "-u", test_script, right_proj, numcalc_exe]
@@ -1585,6 +1661,8 @@ class HRTFProjectManager(ctk.CTk):
 
     def _run_numcalc_full(self, numcalc_exe, res_mode):
         base_folder = os.path.normpath(self.entry_base.get())
+        self.log(f"[i] Boundary condition in export: "
+                 f"{describe_export_boundary(os.path.join(base_folder, 'Exports', 'Left_Project'))}")
         self.log(f"--> Starting Full Simulation ({res_mode.upper()})...")
 
         m2h_input_path = self.get_valid_m2h_input_path()
@@ -1602,7 +1680,11 @@ class HRTFProjectManager(ctk.CTk):
 
         # Targets the 'Exports' directory so manage_numcalc handles both ears
         exports_dir = os.path.join(base_folder, "Exports")
-        cmd = [sys.executable, "-u", full_script, "--project_path", exports_dir, "--numcalc_path", numcalc_arg]
+        # --confirm_errors False: the script otherwise ends with "Hit Enter to
+        # exit" prompts, which never return here, so the GUI would never see
+        # the run finish and step 7 would stay locked until restart.
+        cmd = [sys.executable, "-u", full_script, "--project_path", exports_dir, "--numcalc_path", numcalc_arg,
+               "--confirm_errors", "False"]
         self.run_external_command(cmd)
 
     def run_sofa_generation(self):
@@ -1622,6 +1704,8 @@ class HRTFProjectManager(ctk.CTk):
         
         self.log("--> Generating SOFA Files...")
         cmd = [sys.executable, "-u", script_path, "--left", left_proj, "--right", right_proj, "--m2h_path", m2h_root, "--output", output_dir]
+        if resolution_mode(self.project_data.get("project_resolution", "standard"))["double_length"]:
+            cmd.append("--double-length")  # HiRes: 512-sample SOFAs
         self.run_external_command(cmd)
 
     def open_tilt_dialog(self):

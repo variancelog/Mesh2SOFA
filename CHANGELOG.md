@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.7.0 (2026-11-16) — Skin/Hair Absorption, HiRes Mode & NumCalc Completion Fix
+
+Adds frequency-dependent skin and hair absorption boundary conditions (Brinkmann et
+al. 2025) to the Blender add-on, a third "HiRes" project resolution (20 kHz, 100 Hz
+steps), and fixes Step 7 staying locked after a full NumCalc run.
+
+**1. Boundary conditions (Blender add-on v1.2.0)**
+- New panel setting: **Skin absorption (Brinkmann 2025)** (default) or **Rigid (legacy)**,
+  stored as Scene properties in the `.blend`.
+- Skin mode writes `Exports/Materials/Skin.csv` (normalised admittance, 0–22050 Hz, 50 Hz
+  steps) and passes it to Mesh2HRTF as `materialSearchPaths`; Rigid aborts if Mesh2HRTF's
+  own material Data folder would silently make the export non-rigid.
+- Optional **hair absorption** with adjustable slope *m*: `Auto-select Hair Region`
+  (ear-exclusion cylinder around the interaural axis), `Assign Hair to Selected`, `Clear Hair`.
+  Assign Materials now creates a 4th `Hair` slot.
+- Every export's `NC.inp` is verified against the selected boundary; a mismatch is an error.
+- The GUI logs the boundary found in the export when starting NumCalc (`describe_export_boundary`).
+- New `tests/test_boundary_materials.py` covers the bpy-free physics with stub `bpy`/`bmesh`.
+
+**2. HiRes resolution mode (`project_resolution: "hires"`)**
+- 0–20000 Hz in 100 Hz steps (200 frequencies), same mesh grading as Standard; the 18–20 kHz
+  band is experimental. SOFA generation passes `--double-length` so HiRes outputs are
+  512 samples (Standard/Lowres unchanged at 256).
+- Mode table (`RESOLUTION_MODES` / `resolution_mode()`) now lives in `core/project_store.py`;
+  the add-on mirrors `(max_hz, step_hz)` and `tests/test_resolution_modes.py` asserts they match.
+- `run_numcalc_test.py` takes its test index from the export's `parameters.json` instead of a
+  hard-coded 107/120.
+- New pre-NumCalc guard compares both ears' `parameters.json` with the project mode and
+  warns-but-allows on a mismatch (e.g. mode changed after export, or a stale add-on).
+- Changing mode on an exported project requires deleting `Exports/Left_Project` and
+  `Right_Project` before re-exporting (Mesh2HRTF refuses to overwrite).
+- Note: older Mesh2SOFA versions opening a `hires` project display it as Standard, and
+  clicking the mode toggle there would overwrite the value.
+
+**3. NumCalc completion fix**
+- Workers are launched with `stdin=DEVNULL` and the full run passes `--confirm_errors False`,
+  so `manage_numcalc`'s "Hit Enter to exit" prompt no longer hangs the run and Step 7
+  unlocks without restarting the app.
+
 ## v1.6.0 (2026-07-05) — Repo Reorg, Smarter DFHRTF Weighting & Cut-and-Patch
 
 Splits the flat repo into `core/` (worker/library modules) and `tests/`, upgrades

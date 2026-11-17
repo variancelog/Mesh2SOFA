@@ -68,6 +68,8 @@ To use this orchestrator, you must have the following installed:
     * Create a New Project or Open an existing Project.
     * If your computer has limited RAM (e.g. 8-16GB), select the "Lowres" option from the Project Settings. This will use a slightly lower resolution graded mesh and calculate the HRTF only up to 16 kHz to save on RAM, but will still produce 44.1 kHz and 48 kHz SOFA files through upsampling.
       * NOTE: Limited RAM users are encouraged to use a shoulderless/torsoless mesh to greatly reduce RAM usage during simulation.
+    * Select "HiRes" to calculate up to 20 kHz in 100 Hz steps (200 frequencies instead of 120) and write 512-sample SOFA files. It uses the same graded mesh as Standard, so accuracy in the 18–20 kHz band is **experimental**. Expect roughly 2× (or more) NumCalc time and higher peak RAM at the top frequencies.
+    * Changing the mode after exporting from Blender needs a fresh export: delete `Exports/Left_Project` and `Exports/Right_Project` first (Mesh2HRTF will not overwrite an existing export), then export again. Before NumCalc runs, the GUI checks both exports against the project mode and warns on a mismatch. HiRes needs Mesh2SOFA add-on v1.2.0 or later — if the warning persists after re-exporting, reinstall the add-on in Blender.
     * Under **App Settings**, configure your Mesh2HRTF root folder, **Blender executable** path (required — used both for mesh import and Step 4), and the **Mesh Grading Tool** binary.
     * Under **Project Settings**, select your **Evaluation Grid(s)** and resolution mode.
 
@@ -79,7 +81,7 @@ To use this orchestrator, you must have the following installed:
 
     * **2. Inspect & Fix Mesh** *(optional)* runs a mesh health check on the aligned mesh and shows any detected problems: holes, non-manifold edges, self-intersections, and topological tunnels (genus > 0 "pierced-ear" artifacts that break BEM simulation). You can run an automatic pymeshfix repair pass, or launch the tunnel viewer to cut and patchtunnels interactively — press **Space** to toggle between the two candidate loops (green "Cut here" / red "Avoid"), **Tab** / **Shift+Tab** to cycle handles if multiple tunnels exist, then **C** to apply the cut. The viewer closes automatically and re-validates the mesh. This step is optional — grading will proceed with a warning if you skip it.
 
-    * **3. Process & Grade Mesh** uses PyMeshLab to optimize the mesh for your selected resolution (Standard or Lowres), then runs the mesh grading tool to produce optimized left and right meshes for NumCalc.
+    * **3. Process & Grade Mesh** uses PyMeshLab to optimize the mesh for your selected resolution (Lowres, or Standard — also used by HiRes), then runs the mesh grading tool to produce optimized left and right meshes for NumCalc.
 
     * **4. Open Graded Meshes in Blender** opens a reference Blender scene containing the graded meshes and materials. If a `.blend` already exists, you can choose to open it as-is or overwrite it with a fresh import.
 
@@ -103,8 +105,14 @@ Once the Blender Add-on is installed (see Installation step 4), use the **Mesh2S
    - Create the necessary `Skin`, `Left Ear`, and `Right Ear` materials.
    - Assign `Skin` to the `Left_Graded` and `Right_Graded` meshes.
    - Automatically find the ear openings and assign the correct ear material to the closest face on each side.
-   - NOTE: double-check that the left and right ear materials are applied to the correct locations (success depends on the position of the ear canal entrance relative to the tragus shape/size).
-4. **Step 2: Export Projects.** Click `Export Projects`. This generates the two project folders needed by NumCalc in your project's `Exports` folder.
+   - Create an (initially unused) `Hair` material slot.
+   - NOTE: double-check that the left and right ear materials are applied to the correct locations (success depends on the position of the ear canal entrance relative to the tragus shape/size). Re-running Assign Materials resets all faces, including any painted hair, to `Skin`.
+4. **Boundary Condition.** Choose how the head surface is simulated:
+   - **Skin absorption (Brinkmann 2025)** (default): the `Skin` material gets the skin admittance recommended by Brinkmann et al. (2025). The material file is written to `Exports/Materials/Skin.csv`.
+   - **Rigid (legacy)**: a fully rigid surface, as in earlier Mesh2SOFA versions.
+   - **Hair absorption** (optional, Skin mode only): tick the checkbox, then click `Auto-select Hair Region` to mark the hair region on both meshes with the `Hair` material (faces near the ears are kept as skin; adjust with *Ear exclusion radius*). Refine it with `Assign Hair to Selected` (select faces in Edit Mode on the active mesh) or start over with `Clear Hair`. *Hair slope m* controls how quickly hair absorption rises with frequency: about 4.5 for thin/short hair, 11 for medium, 18 for thick hair.
+   - These settings are saved in the `.blend` file. If hair is off, any painted hair region is exported as skin (the painting itself is kept).
+5. **Step 2: Export Projects.** Click `Export Projects`. This generates the two project folders needed by NumCalc in your project's `Exports` folder. The add-on then checks the generated `NC.inp` files to confirm the selected boundary condition was actually written, and the success message names it (e.g. "Boundary: skin absorption + hair (m=11)"). The main GUI also logs the boundary condition when you start the NumCalc test or full simulation.
 
 If there are errors or missing output in the `Exports` folder, check the Blender system console for details. Common issues include `Left_Graded` or `Right_Graded` meshes missing from the scene.
 
