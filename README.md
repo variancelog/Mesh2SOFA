@@ -87,7 +87,7 @@ To use this orchestrator, you must have the following installed:
 
     * **5. Export Project Folders** is done inside Blender using the Mesh2SOFA panel (details below). This generates the `Left_Project` and `Right_Project` folders used by NumCalc.
 
-    * **6. Run NumCalc Simulation** runs multiple NumCalc instances against your project folders. This step is very compute- and memory-intensive and can take 8–24 hours on a typical home computer. Use "Test Mode" to run a stability check on the highest frequencies before committing to a full simulation. You can stop the simulation at any time with the **STOP PROCESS** button — simulation output is preserved so you can resume later.
+    * **6. Run NumCalc Simulation** runs multiple NumCalc instances against your project folders. This step is very compute- and memory-intensive and can take 8–24 hours on a typical home computer. Use "Test Mode" to run a stability check on the highest frequencies before committing to a full simulation. Test Mode runs both ears at the same time and prints live progress to the log (current phase, elapsed time, NumCalc memory use and free RAM); if free RAM drops below 4 GB it automatically falls back to running the ears one after the other. You can stop the simulation at any time with the **STOP PROCESS** button — simulation output is preserved so you can resume later.
 
     * **7. Generate Mastered SOFA Files** produces four SOFA file variants: diffuse-field equalized and non-equalized, at both 44.1 kHz and 48 kHz. Either variant can be used with SPARTA Binauraliser (which has a built-in optional "Apply Diffuse-Field EQ" setting), while renderers such as APL Virtuoso expect pre-equalized files.
 

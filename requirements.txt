@@ -25,3 +25,6 @@ numpy
 scipy           # vectorized genus / connected-components + Dijkstra for fast loop finding
 matplotlib
 sofar
+
+# --- System ---
+psutil          # NumCalc stability test: RAM watchdog + memory readout (optional; degrades gracefully)

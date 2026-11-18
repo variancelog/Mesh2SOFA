@@ -1655,9 +1655,11 @@ class HRTFProjectManager(ctk.CTk):
 
         self.log(f"[i] Boundary condition in export: {describe_export_boundary(left_proj)}")
         self.log(f"--> Running Stability Test on both ears ({freq_label})...")
-        cmd_left  = [sys.executable, "-u", test_script, left_proj,  numcalc_exe]
-        cmd_right = [sys.executable, "-u", test_script, right_proj, numcalc_exe]
-        self.run_sequential_commands([cmd_left, cmd_right])
+        # One worker runs both ears in parallel (RAM-watchdog falls back to
+        # sequential) and prints phase/heartbeat progress into the log.
+        cmd = [sys.executable, "-u", test_script, "--numcalc", numcalc_exe,
+               left_proj, right_proj]
+        self.run_external_command(cmd)
 
     def _run_numcalc_full(self, numcalc_exe, res_mode):
         base_folder = os.path.normpath(self.entry_base.get())

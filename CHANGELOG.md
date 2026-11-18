@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.7.1 (2026-11-17) — Parallel NumCalc Stability Test with Live Progress
+
+The Step 6 stability test now runs both ears at once instead of one after the other
+(roughly halving the wait) and reports real progress instead of a silent console.
+
+**1. NumCalc stability test (`core/run_numcalc_test.py`)**
+- Left and Right NumCalc runs start together from one worker; the GUI launches it with a
+  single command.
+- Live `[L]`/`[R]` progress: phase transitions (assembling, solving, post-processing,
+  done) parsed from NumCalc's `NC<i>-<i>.out` log, solver iterations and error, plus a 30 s
+  heartbeat with elapsed time, NumCalc memory use and free RAM.
+- RAM watchdog: if free memory drops below 4 GB, the last-started ear is stopped and re-run
+  after the other finishes. `--sequential` forces one-at-a-time.
+- Fixed: the test always reported success; it now fails if either ear's NumCalc fails.
+- Logs left over from earlier runs are ignored, and the console stays responsive with
+  unusual characters in NumCalc output or non-English folder names.
+- New `tests/test_numcalc_test.py` (27 tests, using a fake NumCalc).
+
 ## v1.7.0 (2026-11-16) — Skin/Hair Absorption, HiRes Mode & NumCalc Completion Fix
 
 Adds frequency-dependent skin and hair absorption boundary conditions (Brinkmann et
