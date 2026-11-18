@@ -308,7 +308,7 @@ def _add_labels(plotter, centroids, labels, color, name):
             pass
 
 
-def _label_anchor(centroid, mesh_center, diag, side, up=(0.0, 0.0, 1.0)):
+def _label_anchor(centroid, mesh_center, diag, side, up=(0.0, 0.0, 1.0), off=None):
     """Offset a label away from its loop so the text never covers it.
     Push outward from the mesh centre (off the surface) plus a sideways nudge
     (side = +1 / -1) so two nearby loops' labels separate instead of overlapping.
@@ -320,7 +320,7 @@ def _label_anchor(centroid, mesh_center, diag, side, up=(0.0, 0.0, 1.0)):
     tangent = np.cross(outward, np.asarray(up, float))
     tn = np.linalg.norm(tangent)
     tangent = tangent / tn if tn > 1e-9 else np.array([1.0, 0.0, 0.0])
-    off = 0.11 * diag
+    off = 0.11 * diag if off is None else off
     return c + outward * off + side * tangent * off * 0.9
 
 
@@ -334,7 +334,7 @@ def _add_labels_with_leaders(plotter, targets, anchors, labels, color, name):
         return names
     for j, (t, a) in enumerate(zip(targets, anchors)):
         try:
-            plotter.add_mesh(pv.Line(t, a), color=color, line_width=2,
+            plotter.add_mesh(pv.Line(t, a), color=COLOR_LEADER, line_width=1,
                              render_lines_as_tubes=True,
                              name=f"{name}_leader_{j}", reset_camera=False)
             names.append(f"{name}_leader_{j}")
@@ -520,6 +520,23 @@ DEFECT_ZOOM_SPANS = 3.0
 DEFECT_ZOOM_MIN_FRAC = 0.10
 DEFECT_ZOOM_MAX_FRAC = 0.80
 SEE_THROUGH_OPACITY = 0.4
+# Stage 3b: choosing a view direction from which the defect is actually visible.
+# Candidates = outward + / - the best-fit-plane normal of each loop, plus cones of
+# directions around each; each is scored by rays from the camera to sample points of
+# the defect's loops (blocked fraction); the least blocked wins, ties go to outward.
+VIEW_CONE_DEGREES = (35.0, 60.0)       # cone half-angles around each base direction
+VIEW_CONE_AZIMUTHS = 6                 # directions per cone ring
+VIEW_SAMPLES_PER_LOOP = 16             # ray targets per loop
+VIEW_TOL_SPANS = 0.04                  # rays stop this many spans short of the ring point
+VIEW_OUTWARD_BIAS = 0.1                # score penalty (x angle/pi) for leaving outward
+HIDDEN_FRAC = 0.5                      # best view still blocked more than this => see-through
+HIDDEN_NOTE = ("Turned on see-through: this defect is hidden behind other parts "
+               "of the ear.")
+GREEN_LEGEND = "Green = new surface added by the fix"
+COLOR_MESH_BASE = "#C8B69F"
+COLOR_NEW_SURFACE = "#86C9A0"          # soft green: faces that are not in the original
+CHANGED_ARRAY = "m2s_changed"
+COLOR_LEADER = "#8C8C8C"               # thin neutral label leader lines
 
 
 def option_text(label, index):
@@ -624,14 +641,15 @@ def friendly_progress(msg):
     return "Working..."
 
 
-def defect_camera_pose(loop_point_arrays, mesh_center, mesh_diag):
+def defect_camera_pose(loop_point_arrays, mesh_center, mesh_diag, direction=None):
     """Camera pose that frames one defect.
 
     focal = centroid of the loop pair (mean of the loops' centroids);
     distance = DEFECT_ZOOM_SPANS x bbox diagonal of all the defect's loop points,
     clamped to [MIN_FRAC, MAX_FRAC] x the whole-mesh diagonal;
-    direction = outward from the mesh centre through the focal point (looking
-    at the defect from outside the head, whatever side it is on).
+    direction = `direction` if given (a unit vector from the focal point towards
+    the camera, see choose_defect_view), else outward from the mesh centre
+    through the focal point.
     Returns (position, focal, view_up, distance) as numpy arrays / float."""
     arrays = [np.asarray(a, dtype=float) for a in loop_point_arrays if len(a)]
     focal = np.mean([a.mean(axis=0) for a in arrays], axis=0)
@@ -640,13 +658,170 @@ def defect_camera_pose(loop_point_arrays, mesh_center, mesh_diag):
     dist = float(np.clip(DEFECT_ZOOM_SPANS * span,
                          DEFECT_ZOOM_MIN_FRAC * mesh_diag,
                          DEFECT_ZOOM_MAX_FRAC * mesh_diag))
-    outward = focal - np.asarray(mesh_center, dtype=float)
-    n = np.linalg.norm(outward)
-    outward = outward / n if n > 1e-9 else np.array([0.0, -1.0, 0.0])
+    if direction is None:
+        direction = focal - np.asarray(mesh_center, dtype=float)
+    direction = np.asarray(direction, dtype=float)
+    n = np.linalg.norm(direction)
+    direction = direction / n if n > 1e-9 else np.array([0.0, -1.0, 0.0])
     up = np.array([0.0, 0.0, 1.0])
-    if abs(outward[2]) > 0.95:
+    if abs(direction[2]) > 0.95:
         up = np.array([0.0, 1.0, 0.0])
-    return focal + outward * dist, focal, up, dist
+    return focal + direction * dist, focal, up, dist
+
+
+class SurfaceRayProbe:
+    """Segment-vs-surface occlusion test on the mesh (vtkStaticCellLocator: no
+    rendering, no GL, so it is safe off the GUI thread; build ~15 ms and ~25 us per
+    ray on a 75k-face head). Build once per mesh; read-only afterwards."""
+
+    def __init__(self, pts, faces):
+        from vtkmodules.vtkCommonCore import mutable
+        from vtkmodules.vtkCommonDataModel import vtkStaticCellLocator
+        self._mutable = mutable
+        faces = np.asarray(faces, dtype=np.int64)
+        cells = np.hstack([np.full((len(faces), 1), 3, dtype=np.int64), faces]).ravel()
+        self._poly = pv.PolyData(np.asarray(pts, dtype=np.float64), cells)
+        self._loc = vtkStaticCellLocator()
+        self._loc.SetDataSet(self._poly)
+        self._loc.BuildLocator()
+
+    def blocked(self, a, b):
+        """True if the segment a -> b crosses the surface."""
+        mutable = self._mutable
+        return bool(self._loc.IntersectWithLine(
+            tuple(map(float, a)), tuple(map(float, b)), 1e-9,
+            mutable(0.0), [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
+            mutable(0), mutable(0)))
+
+
+def _plane_normal(p):
+    """Unit normal of the best-fit plane through points p (smallest-variance axis)."""
+    p = np.asarray(p, dtype=float)
+    if len(p) < 3:
+        return None
+    _u, _s, vt = np.linalg.svd(p - p.mean(axis=0), full_matrices=False)
+    n = vt[-1]
+    nn = np.linalg.norm(n)
+    return n / nn if nn > 1e-12 else None
+
+
+def _cone_directions(base, half_angle_deg, n_az):
+    base = np.asarray(base, dtype=float)
+    helper = np.array([0.0, 0.0, 1.0]) if abs(base[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    u = np.cross(base, helper)
+    u /= np.linalg.norm(u)
+    v = np.cross(base, u)
+    a = np.radians(half_angle_deg)
+    return [np.cos(a) * base + np.sin(a) * (np.cos(t) * u + np.sin(t) * v)
+            for t in np.linspace(0.0, 2 * np.pi, n_az, endpoint=False)]
+
+
+def view_candidates(loop_point_arrays, outward):
+    """Unit view directions (focal point -> camera) to try: outward first, then
+    +/- each loop's best-fit-plane normal, then cones around all of those.
+    Near-duplicates are dropped; the order is stable."""
+    outward = np.asarray(outward, dtype=float)
+    outward = outward / np.linalg.norm(outward)
+    bases = [outward]
+    for arr in loop_point_arrays:
+        n = _plane_normal(arr)
+        if n is not None:
+            bases += [n, -n]
+    cands = list(bases)
+    for b in bases:
+        for deg in VIEW_CONE_DEGREES:
+            cands += _cone_directions(b, deg, VIEW_CONE_AZIMUTHS)
+    out = []
+    for d in cands:
+        d = np.asarray(d, dtype=float)
+        d = d / np.linalg.norm(d)
+        if all(float(np.dot(d, e)) < 0.999 for e in out):
+            out.append(d)
+    return out
+
+
+def choose_defect_view(probe, loop_point_arrays, mesh_center, mesh_diag):
+    """Pick the camera pose from which the defect is actually visible.
+
+    Each candidate direction (view_candidates) puts the camera at the framing
+    distance; rays are cast from the camera to sample points of ALL the defect's
+    loops, stopping VIEW_TOL_SPANS x span short of the ring point so the ring's own
+    adjacent faces do not count; the blocked fraction is the score. A camera
+    that sits INSIDE the head (the ray from it away from the defect hits the
+    surface) scores 1.0. The best score wins; VIEW_OUTWARD_BIAS x angle/pi makes
+    ties go to the outward direction. Returns a dict: pos, focal, up, dist,
+    direction, frac (blocked fraction of the chosen view), outward_frac,
+    hidden (frac > HIDDEN_FRAC: even the best view is mostly hidden)."""
+    arrays = [np.asarray(a, dtype=float) for a in loop_point_arrays if len(a)]
+    mesh_center = np.asarray(mesh_center, dtype=float)
+    pos0, focal, _up0, dist = defect_camera_pose(arrays, mesh_center, mesh_diag)
+    outward = (pos0 - focal) / dist
+    allp = np.vstack(arrays)
+    span = float(np.linalg.norm(allp.max(axis=0) - allp.min(axis=0)))
+    tol = VIEW_TOL_SPANS * max(span, 1e-9)
+    targets = []
+    for a in arrays:
+        idx = np.unique(np.linspace(0, len(a) - 1,
+                                    min(len(a), VIEW_SAMPLES_PER_LOOP)).astype(int))
+        targets.append(a[idx])
+    targets = np.vstack(targets)
+    far = 4.0 * float(mesh_diag)
+
+    def blocked_fraction(d):
+        cam = focal + d * dist
+        if probe.blocked(cam, cam + d * far):      # camera is inside / behind the surface
+            return 1.0
+        nb = 0
+        for q in targets:
+            u = cam - q
+            un = np.linalg.norm(u)
+            if un < 1e-12:
+                continue
+            if probe.blocked(cam, q + u / un * tol):
+                nb += 1
+        return nb / len(targets)
+
+    best = None
+    outward_frac = None
+    for i, d in enumerate(view_candidates(arrays, outward)):
+        frac = blocked_fraction(d)
+        if i == 0:
+            outward_frac = frac
+        ang = float(np.arccos(np.clip(np.dot(d, outward), -1.0, 1.0)))
+        score = frac + VIEW_OUTWARD_BIAS * ang / np.pi
+        if best is None or score < best[0] - 1e-12:
+            best = (score, d, frac)
+    _score, d, frac = best
+    pos, focal, up, dist = defect_camera_pose(arrays, mesh_center, mesh_diag, direction=d)
+    return {"pos": pos, "focal": focal, "up": up, "dist": dist, "direction": d,
+            "frac": float(frac), "outward_frac": float(outward_frac),
+            "hidden": bool(frac > HIDDEN_FRAC)}
+
+
+class ChangedFaceDetector:
+    """Which faces of a fix result are NOT in the original mesh (the patch caps /
+    remeshed region). Compares face centroids against the original's with a
+    cKDTree (built lazily, once; thread-safe); unchanged faces keep their exact
+    coordinates, so any centroid further than `tol` from every original centroid
+    is new. numpy / scipy only (worker-safe)."""
+
+    def __init__(self, pts, faces, tol=None):
+        self._pts = np.asarray(pts, dtype=float)
+        self._faces = np.asarray(faces)
+        diag = (float(np.linalg.norm(self._pts.max(0) - self._pts.min(0)))
+                if len(self._pts) else 1.0)
+        self.tol = 1e-5 * diag if tol is None else float(tol)
+        self._tree = None
+        self._lock = threading.Lock()
+
+    def mask(self, new_pts, new_faces):
+        from scipy.spatial import cKDTree
+        with self._lock:
+            if self._tree is None:
+                self._tree = cKDTree(self._pts[self._faces].mean(axis=1))
+        cen = np.asarray(new_pts, dtype=float)[np.asarray(new_faces)].mean(axis=1)
+        d, _ = self._tree.query(cen)
+        return d > self.tol
 
 
 def _cut_preview_serve(conn):
@@ -683,8 +858,10 @@ class PreviewCache:
         self.pts = pts
         self.faces = faces
         self._loops = dict(loops_by_key)
-        self._entries = {k: {"state": "pending", "result": None, "reason": None}
+        self._entries = {k: {"state": "pending", "result": None, "reason": None,
+                             "mask": None}
                          for k in self._loops}
+        self.detector = ChangedFaceDetector(pts, faces)
         self._state_lock = threading.Lock()
         self._compute_lock = threading.Lock()
         self._stop = threading.Event()
@@ -704,6 +881,12 @@ class PreviewCache:
         with self._state_lock:
             e = self._entries[key]
             return e["result"] if e["state"] == "ready" else None
+
+    def changed_mask(self, key):
+        """Bool array over the ready preview's faces: True = not in the original
+        (computed in the worker right after the cut), else None."""
+        with self._state_lock:
+            return self._entries[key]["mask"]
 
     def pending_keys(self):
         with self._state_lock:
@@ -814,8 +997,14 @@ class PreviewCache:
             new_faces = np.array(new_faces, dtype=np.int64)
             new_pts.flags.writeable = False
             new_faces.flags.writeable = False
+            try:       # the "new surface" highlight; failure only loses the colour
+                mask = self.detector.mask(new_pts, new_faces)
+            except Exception as ex:   # noqa: BLE001
+                print(f"[tunnel] changed-face detection failed: {ex}", file=sys.stderr)
+                mask = None
             with self._state_lock:
-                e.update(state="ready", result=(new_pts, new_faces), reason=None)
+                e.update(state="ready", result=(new_pts, new_faces), reason=None,
+                         mask=mask)
         except Exception as ex:   # noqa: BLE001 - cached as the failure reason
             with self._state_lock:
                 e.update(state="failed", result=None, reason=str(ex))
@@ -923,7 +1112,14 @@ class TunnelSelector:
         self.result_genus = None
         self.kept = False           # True once Keep saved the result
         self._surface_cache = {}    # key -> pv mesh (main thread only)
+        self._mask_any = {}         # key -> that result has new (green) faces
         self.see_through = False
+        self._auto_see = False      # True while see-through was switched on by itself
+        self._probe = None          # SurfaceRayProbe, built lazily (first zoom)
+        self._poses = {}            # defect index -> choose_defect_view() result
+        self._detector = None       # ChangedFaceDetector for multi-defect results
+        self.result_mask = None     # changed-face mask of the unkept fix
+        self.last_pose_ms = None    # time the last (uncached) pose took
         self.center = self.pts.mean(0)
         self.diag = float(np.linalg.norm(self.pts.max(0) - self.pts.min(0)))
         self.active = 0             # active defect index
@@ -1000,6 +1196,10 @@ class TunnelSelector:
     def notes(self):
         h = self.handles[self.active]
         notes = defect_notes(h["labels"], len(self.handles), self.genus)
+        if self.auto_see_through_note():
+            notes.insert(0, HIDDEN_NOTE)
+        if self.new_surface_legend():
+            notes.append(self.new_surface_legend())
         for hi, hh in enumerate(self.handles):
             if not any(self.option_usable(hi, li) for li in range(len(hh["loops"]))):
                 notes.append(
@@ -1028,14 +1228,15 @@ class TunnelSelector:
     # Navigation / selection (keys and panel buttons share these)
     # ------------------------------------------------------------------
     def set_active(self, idx, zoom=True):
-        """Make defect `idx` the active one; re-frames the camera on it."""
+        """Make defect `idx` the active one; re-frames the camera on it (and turns
+        see-through on / off by itself when that defect needs it, see show_defect)."""
         if (not 0 <= idx < len(self.handles) or idx == self.active
                 or self.mode != "choose" or self.busy):
             return
         self.active = idx
         self.redraw()
         if zoom:
-            self.zoom_to_defect()
+            self.show_defect()
         self._changed()
 
     def next_handle(self):
@@ -1073,19 +1274,73 @@ class TunnelSelector:
     # ------------------------------------------------------------------
     # Camera (A4)
     # ------------------------------------------------------------------
-    def zoom_to_defect(self):
-        """Frame the active defect: focal point = pair centroid, a few loop
-        diameters away (see defect_camera_pose)."""
-        h = self.handles[self.active]
-        arrays = ([self.pts[lp] for lp in h["loops"]]
-                  + [self.pts[lp] for (lp, _r) in h["blocked"]])
+    def _defect_arrays(self, hi):
+        h = self.handles[hi]
+        return ([self.pts[lp] for lp in h["loops"]]
+                + [self.pts[lp] for (lp, _r) in h["blocked"]])
+
+    def defect_pose(self, hi=None):
+        """Cached camera pose of defect `hi` (default: the active one): the view
+        direction with the least occluded rings (choose_defect_view). The ray
+        locator is built once, on first use; without face data the plain outward
+        pose is used. Never raises."""
+        hi = self.active if hi is None else hi
+        pose = self._poses.get(hi)
+        if pose is not None:
+            return pose
+        arrays = self._defect_arrays(hi)
+        t0 = time.perf_counter()
         try:
-            pos, focal, up, _dist = defect_camera_pose(arrays, self.center, self.diag)
-            self.pl.camera_position = [tuple(pos), tuple(focal), tuple(up)]
+            if self.faces is None:
+                raise ValueError("no face data")
+            if self._probe is None:
+                self._probe = SurfaceRayProbe(self.pts, self.faces)
+            pose = choose_defect_view(self._probe, arrays, self.center, self.diag)
+        except Exception as e:
+            print(f"[tunnel] view search skipped ({e}); using the outward view",
+                  file=sys.stderr)
+            pos, focal, up, dist = defect_camera_pose(arrays, self.center, self.diag)
+            pose = {"pos": pos, "focal": focal, "up": up, "dist": dist,
+                    "direction": (pos - focal) / dist, "frac": 0.0,
+                    "outward_frac": 0.0, "hidden": False}
+        self.last_pose_ms = (time.perf_counter() - t0) * 1000.0
+        self._poses[hi] = pose
+        return pose
+
+    def zoom_to_defect(self):
+        """Frame the active defect (Z key / button): focal point = pair centroid,
+        a few loop diameters away, from the least occluded direction (see
+        defect_pose). The same pose is used for Before / After and the after-view
+        because the camera is never touched by them."""
+        try:
+            pose = self.defect_pose()
+            self.pl.camera_position = [tuple(pose["pos"]), tuple(pose["focal"]),
+                                       tuple(pose["up"])]
             self.pl.reset_camera_clipping_range()
             self.pl.render()
         except Exception as e:
             print(f"[tunnel] zoom to defect skipped: {e}", file=sys.stderr)
+
+    def show_defect(self):
+        """zoom_to_defect plus the automatic see-through decision: when even the
+        best view of this defect is mostly hidden (> HIDDEN_FRAC of the ring
+        points blocked) see-through is switched on (and the panel says so); when
+        a defect that does not need it is shown and see-through was only on
+        because of the automatic rule, it is switched off again. A user's own
+        X / button choice is never overridden."""
+        self.zoom_to_defect()
+        hidden = bool(self.defect_pose().get("hidden"))
+        if hidden and not self.see_through:
+            self.set_see_through(True, auto=True)
+        elif not hidden and self.see_through and self._auto_see:
+            self.set_see_through(False)
+
+    def auto_see_through_note(self):
+        """True while the panel should say see-through was turned on for the
+        active defect because it is hidden."""
+        return bool(self._auto_see and self.see_through
+                    and self.mode == "choose"
+                    and self._poses.get(self.active, {}).get("hidden"))
 
     def whole_head(self):
         """Back to the whole head, seen from the side the active defect is on."""
@@ -1098,10 +1353,12 @@ class TunnelSelector:
         except Exception as e:
             print(f"[tunnel] whole-head view skipped: {e}", file=sys.stderr)
 
-    def set_see_through(self, on):
+    def set_see_through(self, on, auto=False):
         """Make the head surface see-through (opacity ~0.4) so loops inside ear
-        folds show; False restores the normal opacity."""
+        folds show; False restores the normal opacity. auto=True marks the change
+        as the automatic hidden-defect rule (any other call is the user's)."""
         self.see_through = bool(on)
+        self._auto_see = bool(auto) and self.see_through
         opacity = SEE_THROUGH_OPACITY if self.see_through else MESH_OPACITY
         try:
             for name in ("surface", "components", "result_surface"):
@@ -1170,6 +1427,12 @@ class TunnelSelector:
         for hi, h in enumerate(self.handles):
             sel = h["sel"]
             is_active = (hi == self.active)
+            # Labels sit about half a defect-size from their ring (not a fixed share of
+            # the head), so they stay inside the zoomed view and their leader lines
+            # stay short.
+            pair = np.vstack([self.pts[lp] for lp in h["loops"]])
+            span = float(np.linalg.norm(pair.max(0) - pair.min(0)))
+            off = float(np.clip(0.6 * span, 0.01 * self.diag, 0.11 * self.diag))
 
             for li, lp in enumerate(h["loops"]):
                 is_sel = (li == sel)
@@ -1188,7 +1451,8 @@ class TunnelSelector:
             if not is_active:
                 # Other defects: one short tag on the selected ring.
                 cc = self.pts[h["loops"][sel]].mean(0)
-                self._label([cc], [_label_anchor(cc, self.center, self.diag, +1)],
+                self._label([cc], [_label_anchor(cc, self.center, self.diag, +1,
+                                                 off=off)],
                             [f"Defect {hi + 1}"], COLOR_CUT_INACTIVE,
                             f'lbl_{hi}_sel')
             else:
@@ -1200,7 +1464,7 @@ class TunnelSelector:
                     cc = self.pts[lp].mean(0)
                     self._label([cc],
                                 [_label_anchor(cc, self.center, self.diag,
-                                               +1 if is_sel else -1)],
+                                               +1 if is_sel else -1, off=off)],
                                 [title + ("\n[selected]" if is_sel else "")],
                                 COLOR_CUT_ACTIVE if is_sel else COLOR_IGNORE_ACTIVE,
                                 f'lbl_{hi}_{li}')
@@ -1212,7 +1476,8 @@ class TunnelSelector:
                 if is_active:
                     bc = self.pts[blp].mean(0)
                     self._label([bc],
-                                [_label_anchor(bc, self.center, self.diag, -1)],
+                                [_label_anchor(bc, self.center, self.diag, -1,
+                                               off=off)],
                                 [UNAVAILABLE_TEXT], COLOR_BLOCKED,
                                 f'blocked_lbl_{hi}_{bi}')
 
@@ -1287,6 +1552,38 @@ class TunnelSelector:
         self._apply_view()
         self._changed()
 
+    def _get_detector(self):
+        if self.previews is not None:
+            return self.previews.detector
+        if self._detector is None:
+            self._detector = ChangedFaceDetector(self.pts, self.faces)
+        return self._detector
+
+    def _changed_mask(self, key, result):
+        """Faces of `result` that are not in the original mesh. Normally already
+        computed off the GUI thread (preview worker / Apply job); only a missing
+        one is computed here (~0.1 s)."""
+        m = None
+        if key == "fix":
+            m = self.result_mask
+        elif self.previews is not None:
+            m = self.previews.changed_mask(key)
+        if m is None or len(m) != len(result[1]):
+            try:
+                m = self._get_detector().mask(*result)
+            except Exception as e:
+                print(f"[tunnel] changed-face detection failed: {e}", file=sys.stderr)
+                m = None
+        return m
+
+    def new_surface_legend(self):
+        """GREEN_LEGEND while the main view shows a result that has new faces."""
+        shown = self.shown_result()
+        if (shown is not None and self.view == "after"
+                and self._mask_any.get(shown[0])):
+            return GREEN_LEGEND
+        return None
+
     def _surface_mesh(self, key, result):
         mesh = self._surface_cache.get(key)
         if mesh is None:
@@ -1294,11 +1591,19 @@ class TunnelSelector:
             cells = np.hstack([np.full((len(rfaces), 1), 3, dtype=np.int64),
                                np.asarray(rfaces, dtype=np.int64)]).ravel()
             mesh = pv.PolyData(np.asarray(rpts, dtype=np.float64), cells)
+            mask = self._changed_mask(key, result)
+            has_new = mask is not None and bool(np.any(mask))
+            if has_new:
+                mesh.cell_data[CHANGED_ARRAY] = np.asarray(mask, dtype=np.uint8)
+            self._mask_any[key] = has_new
             try:
                 mesh = mesh.compute_normals(auto_orient_normals=True,
                                             consistent_normals=True, inplace=False)
             except Exception:
                 pass
+            if (has_new and (CHANGED_ARRAY not in mesh.cell_data
+                             or mesh.n_cells != len(mask))):
+                self._mask_any[key] = False        # a filter dropped it: plain colour
             self._surface_cache[key] = mesh
         return mesh
 
@@ -1321,11 +1626,19 @@ class TunnelSelector:
             key, result = shown
             try:
                 opacity = SEE_THROUGH_OPACITY if self.see_through else MESH_OPACITY
-                self.pl.add_mesh(self._surface_mesh(key, result), color="#C8B69F",
-                                 opacity=opacity, show_edges=False,
-                                 ambient=MESH_AMBIENT, diffuse=MESH_DIFFUSE,
-                                 specular=MESH_SPECULAR, name="result_surface",
-                                 reset_camera=False, render=False)
+                rmesh = self._surface_mesh(key, result)
+                look = dict(opacity=opacity, show_edges=False,
+                            ambient=MESH_AMBIENT, diffuse=MESH_DIFFUSE,
+                            specular=MESH_SPECULAR, name="result_surface",
+                            reset_camera=False, render=False)
+                if self._mask_any.get(key):
+                    # the new surface (patch caps / remeshed region) in soft green
+                    self.pl.add_mesh(rmesh, scalars=CHANGED_ARRAY,
+                                     cmap=[COLOR_MESH_BASE, COLOR_NEW_SURFACE],
+                                     clim=[0, 1], n_colors=2,
+                                     show_scalar_bar=False, **look)
+                else:
+                    self.pl.add_mesh(rmesh, color=COLOR_MESH_BASE, **look)
             except Exception as e:
                 print(f"[tunnel] could not show the result: {e}", file=sys.stderr)
                 self.view = "before"
@@ -1473,6 +1786,13 @@ class TunnelSelector:
                 res = cut_and_patch_loops(self.pts, self.faces, cut_loops)
             holder["result"] = res
             holder["genus"] = int(mesh_genus(np.asarray(res[0]), np.asarray(res[1])))
+            try:     # the green "new surface" faces, off the GUI thread
+                m = (cache.changed_mask(chosen[0])
+                     if len(cut_loops) == 1 and cache is not None else None)
+                holder["mask"] = (m if m is not None
+                                  else self._get_detector().mask(*res))
+            except Exception as e:   # noqa: BLE001 - only the colour is lost
+                print(f"[tunnel] changed-face detection failed: {e}", file=sys.stderr)
 
         self._status("Fixing the mesh... " + CUT_HINT, COLOR_PALE_YELLOW)
 
@@ -1504,6 +1824,7 @@ class TunnelSelector:
                 self.on_preview_update_after_failure()
             return
         self.result = holder["result"]
+        self.result_mask = holder.get("mask")
         self.result_genus = holder["genus"]
         self.mode = "after"
         self.view = "after"
@@ -1527,10 +1848,12 @@ class TunnelSelector:
         if self.busy or self.mode != "after":
             return
         self.result = None
+        self.result_mask = None
         self.result_genus = None
         self.mode = "choose"
         self.view = "before"
         self._surface_cache.pop("fix", None)
+        self._mask_any.pop("fix", None)
         self.redraw()                 # rings back, original surface shown
         self._status("Undone - nothing was changed.", "#ccc")
         self._changed()
@@ -2535,8 +2858,10 @@ def _build_qt_classes():
             # After-view
             if after and sel.result_genus is not None:
                 self._lbl_after.setText(fixed_banner(sel.result_genus))
+                legend = sel.new_surface_legend()
                 self._lbl_after_note.setText(
-                    AFTER_LEFT_NOTE if sel.result_genus > 0 else AFTER_NOTE)
+                    (AFTER_LEFT_NOTE if sel.result_genus > 0 else AFTER_NOTE)
+                    + (("\n" + legend) if legend else ""))
                 self._banner.setText(fixed_banner(sel.result_genus)
                                      + ("" if sel.view == "after" else "   (showing Before)"))
                 self._banner.adjustSize()
@@ -2741,7 +3066,7 @@ def _build_qt_classes():
                     "highlighted rings, then choose an option.")
                 self.status_label.setText(
                     f"Found {n} defect{'s' if n != 1 else ''}.")
-                sel.zoom_to_defect()
+                sel.show_defect()
                 self.plotter.setFocus()
                 sel.start_previews()       # rings first, previews fill in after
             elif found:
