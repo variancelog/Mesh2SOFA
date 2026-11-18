@@ -431,7 +431,7 @@ class AlignHeadApp(QtWidgets.QMainWindow):
 
         title = "Mesh Quality Issues Detected"
         if tunnel_only_critical:
-            block_msg = "Topological tunnel(s) detected — fix by sculpting in Blender or an external tool, then re-align."
+            block_msg = "See-through hole(s) (topological tunnels) detected — fix them in Step 2 (Inspect & Fix Mesh): Fill the hole / Remove the bridge."
         else:
             block_msg = "Step blocked until issues are resolved or repaired."
         body = f"{summary}\n\n{block_msg if is_critical else 'Minor issues only — you may continue or attempt a repair.'}"

@@ -397,8 +397,17 @@ def test_replace_error_removes_tmp_and_keeps_original(tmp_path, monkeypatch):
     assert _listing(tmp_path) == ["aligned_head.ply"]
 
 
+def _real_ply_bytes(tmp_path):
+    q = tmp_path / "_src.ply"
+    pv.Sphere(theta_resolution=8, phi_resolution=8).triangulate().save(str(q))
+    data = q.read_bytes()
+    q.unlink()
+    return data
+
+
 def test_restore_puts_backup_back_and_clears_check(tmp_path):
-    mesh = _mesh_file(tmp_path)
+    original = _real_ply_bytes(tmp_path)
+    mesh = _mesh_file(tmp_path, original)
     store = ps.ProjectStore(str(tmp_path), mesh_dir=str(tmp_path))
     store.write_check(ps.MESH_ALIGNED, {"aligned": ("ok", {})})
     assert store.read_check(ps.MESH_ALIGNED) == ps.CleanState.CLEAN
@@ -408,12 +417,36 @@ def test_restore_puts_backup_back_and_clears_check(tmp_path):
     ps.apply_with_backup(mesh, lambda: b"FIXED", _write_bytes)
     assert store.has_aligned_backup()
     assert store.restore_aligned_backup() is True
-    assert open(mesh, "rb").read() == b"ORIGINAL"
+    assert open(mesh, "rb").read() == original
     assert store.read_check(ps.MESH_ALIGNED) == ps.CleanState.NOT_RUN
     assert not os.path.exists(ps.tmp_path_for(mesh))
     # a later fix keeps the SAME (pre-first-fix) backup
     ps.apply_with_backup(mesh, lambda: b"FIXED2", _write_bytes)
-    assert open(store.aligned_backup_path, "rb").read() == b"ORIGINAL"
+    assert open(store.aligned_backup_path, "rb").read() == original
+
+
+@pytest.mark.parametrize("bad", [b"", b"this is not a ply file"])
+def test_restore_rejects_empty_or_unreadable_backup(tmp_path, bad):
+    mesh = _mesh_file(tmp_path, b"CURRENT-GOOD-MESH")
+    store = ps.ProjectStore(str(tmp_path), mesh_dir=str(tmp_path))
+    open(ps.backup_path_for(mesh), "wb").write(bad)
+    store.write_check(ps.MESH_ALIGNED, {"aligned": ("ok", {})})
+    with pytest.raises(ValueError) as ei:
+        store.restore_aligned_backup()
+    assert "backup" in str(ei.value)
+    assert open(mesh, "rb").read() == b"CURRENT-GOOD-MESH"      # untouched
+    assert store.read_check(ps.MESH_ALIGNED) == ps.CleanState.CLEAN   # check kept
+    assert not os.path.exists(ps.tmp_path_for(mesh))
+
+
+def test_restore_rejects_backup_without_faces(tmp_path):
+    mesh = _mesh_file(tmp_path, b"CURRENT-GOOD-MESH")
+    q = tmp_path / "_pts.ply"
+    pv.PolyData(np.random.rand(10, 3)).save(str(q))   # points only, no faces
+    os.replace(str(q), ps.backup_path_for(mesh))
+    with pytest.raises(ValueError):
+        ps.restore_backup(mesh)
+    assert open(mesh, "rb").read() == b"CURRENT-GOOD-MESH"
 
 
 def test_realign_clears_backup(tmp_path):
@@ -531,3 +564,55 @@ def test_write_ply_tmp_roundtrip_any_extension(tmp_path, torus):
     assert os.path.getsize(out) > 0
     back = pv.PLYReader(out).read()
     assert back.n_cells == len(faces)
+
+
+# ---------------------------------------------------------------------------
+# restore_backup must survive truncated binary PLYs (VTK's reader segfaults on
+# them). Each case runs restore_backup in a CHILD process so a native crash
+# fails the test instead of killing pytest.
+# ---------------------------------------------------------------------------
+_RESTORE_CHILD = r"""
+import sys
+sys.path.insert(0, sys.argv[1])
+import project_store as ps
+try:
+    ps.restore_backup(sys.argv[2])
+except ValueError as e:
+    print("VALUEERROR:", e)
+    sys.exit(0)
+print("RESTORED")
+"""
+
+
+def _restore_in_child(mesh):
+    import subprocess
+    core = os.path.dirname(os.path.abspath(ps.__file__))
+    return subprocess.run([sys.executable, "-c", _RESTORE_CHILD, core, mesh],
+                          capture_output=True, text=True, timeout=120)
+
+
+@pytest.mark.parametrize("keep", ["300", "half"])
+def test_restore_rejects_truncated_binary_ply_without_crashing(tmp_path, keep):
+    full = tmp_path / "full.ply"
+    pv.Sphere(theta_resolution=40, phi_resolution=40).triangulate().save(
+        str(full), binary=True)
+    data = full.read_bytes()
+    full.unlink()
+    assert data.startswith(b"ply") and b"binary" in data[:200]
+    cut = 300 if keep == "300" else len(data) // 2
+    mesh = _mesh_file(tmp_path, b"CURRENT-GOOD-MESH")
+    open(ps.backup_path_for(mesh), "wb").write(data[:cut])
+    r = _restore_in_child(mesh)
+    assert r.returncode == 0, f"restore_backup crashed the process: {r.returncode} {r.stderr[-300:]}"
+    assert "VALUEERROR" in r.stdout and "backup" in r.stdout
+    assert open(mesh, "rb").read() == b"CURRENT-GOOD-MESH"
+    assert not os.path.exists(ps.tmp_path_for(mesh))
+
+
+def test_restore_accepts_valid_binary_ply_in_child(tmp_path):
+    original = _real_ply_bytes(tmp_path)
+    mesh = _mesh_file(tmp_path, b"CURRENT-GOOD-MESH")
+    open(ps.backup_path_for(mesh), "wb").write(original)
+    r = _restore_in_child(mesh)
+    assert r.returncode == 0 and "RESTORED" in r.stdout, r.stdout + r.stderr
+    assert open(mesh, "rb").read() == original

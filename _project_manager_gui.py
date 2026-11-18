@@ -373,7 +373,8 @@ class AlignedMeshDialog(ctk.CTkToplevel):
     """Dialog for the standalone 'Inspect & Fix Mesh' step (operates on the
     aligned mesh). Repair is suppressed when the only criticals are topological
     tunnels (genus>0), which geometric repair cannot fix — those go to the
-    interactive tunnel viewer for click-to-select + Cut+Patch."""
+    interactive see-through-hole fixer (pick "Fill the hole" or "Remove the
+    bridge" for each defect, then Apply)."""
     def __init__(self, parent, mesh_dir, summary, tunnel_only, callback):
         super().__init__(parent)
         self.callback = callback
@@ -387,8 +388,9 @@ class AlignedMeshDialog(ctk.CTkToplevel):
         self.grab_set()
 
         if tunnel_only:
-            hint = ("Topological tunnel(s) detected. Geometric repair cannot fix these —\n"
-                    "open the tunnel viewer, click the cut loop, and Apply Cut+Patch.")
+            hint = ("See-through hole(s) detected (topological tunnels). Geometric repair\n"
+                    "cannot fix these. Open the fixer, choose 'Fill the hole' or 'Remove the\n"
+                    "bridge' for each defect, and click Apply.")
         else:
             hint = ("Critical mesh issues found. Attempt Repair (pymeshfix) to clean\n"
                     "self-intersections / non-manifold / boundaries, then re-inspect.")
@@ -404,7 +406,7 @@ class AlignedMeshDialog(ctk.CTkToplevel):
 
         ctk.CTkButton(btn_frame, text="Cancel", fg_color="transparent", border_width=1,
                       text_color=("gray10", "#DCE4EE"), command=self.on_cancel).pack(side="right", padx=10)
-        ctk.CTkButton(btn_frame, text="Fix Tunnels (Viewer)", fg_color="#C0392B",
+        ctk.CTkButton(btn_frame, text="Fix See-through Holes (Viewer)", fg_color="#C0392B",
                       hover_color="#A93226", command=self.on_visualize).pack(side="right", padx=10)
         if not tunnel_only:
             ctk.CTkButton(btn_frame, text="Attempt Repair", fg_color="#2CC985",
@@ -1021,7 +1023,7 @@ class HRTFProjectManager(ctk.CTk):
                 "Importing a new mesh will DELETE the existing aligned / graded / "
                 "inspection files in the Meshes folder:\n\n"
                 f"  {artifact_list}\n\n"
-                "Alignment and Inspect & Fix (Cut+Patch) must be redone for the "
+                "Alignment and Inspect & Fix (including any see-through-hole fix) must be redone for the "
                 "new mesh.\n\nContinue?",
             ):
                 return
@@ -1241,9 +1243,10 @@ class HRTFProjectManager(ctk.CTk):
             viewer = os.path.join(CORE_DIR, "mesh_problem_viewer.py")
             ply = os.path.join(mesh_dir, "aligned_head.ply")
             if os.path.exists(ply):
-                self.log("--> Opening tunnel viewer. Choose the cut loop (Tab/Space), "
-                         "then press C to apply Cut+Patch — the viewer will close and "
-                         "re-validate automatically.")
+                self.log("--> Opening the see-through-hole fixer. For each defect choose "
+                         "'Fill the hole' or 'Remove the bridge' (click a card, or "
+                         "Space / Tab), then click Apply (or press C). The window will "
+                         "close and the mesh is re-checked automatically.")
                 proc = subprocess.Popen([sys.executable, viewer, ply],
                                         creationflags=CREATE_NO_WINDOW)
                 self._watch_viewer(proc, lambda: self._after_tunnel_viewer(mesh_dir))
@@ -1263,7 +1266,7 @@ class HRTFProjectManager(ctk.CTk):
             os.remove(sentinel)
         except Exception:
             pass
-        self.log("--> Cut+Patch applied. Re-inspecting and auto-repairing aligned mesh…")
+        self.log("--> Hole fix applied. Re-inspecting and auto-repairing aligned mesh…")
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
         inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
         self._pending_cutpatch_revalidate = True
@@ -1288,14 +1291,14 @@ class HRTFProjectManager(ctk.CTk):
             )
             messagebox.showwarning(
                 "Re-validation — Issues Remain",
-                "The mesh was saved after Cut+Patch but still has critical issues:\n\n"
+                "The mesh was saved after the hole fix but still has critical issues:\n\n"
                 f"{issues_txt}\n\n"
                 "Run 'Inspect & Fix Mesh' again to view and address them.",
             )
         else:
             messagebox.showinfo(
                 "All Clear",
-                "Tunnel removed and mesh re-validated — no critical issues remain.\n\n"
+                "See-through hole fixed and mesh re-checked — no critical issues remain.\n\n"
                 "You may proceed to Step 3 (Process & Grade).",
             )
 
@@ -1342,12 +1345,14 @@ class HRTFProjectManager(ctk.CTk):
         elif tunnel_issues:
             # Tunnels detected but not removable before alignment.
             messagebox.showwarning(
-                "Import Complete — Tunnel Detected",
+                "Import Complete — See-through Hole Detected",
                 f"{base_msg}\n\n"
-                "A topological tunnel (genus>0) was detected — this is a scanning "
-                "artifact that cannot be removed on the raw mesh.\n\n"
+                "A see-through hole through the mesh (a topological tunnel, genus>0) "
+                "was detected. This is a scanning artifact that cannot be removed on "
+                "the raw mesh.\n\n"
                 "After running Step 1 (Align), use Step 2 (Inspect & Fix Mesh) to "
-                "locate and remove the tunnel with the interactive Cut+Patch tool.",
+                "fix it: the fixer shows where it is and offers 'Fill the hole' or "
+                "'Remove the bridge'.",
             )
         else:
             messagebox.showinfo("Import Complete", base_msg)
@@ -1512,11 +1517,11 @@ class HRTFProjectManager(ctk.CTk):
         store = self._store(mesh_dir)
         if not store.has_aligned_backup():
             self.update_workflow_state()
-            return self.log("No pre-tunnel-fix backup found; nothing to restore.")
+            return self.log("No backup from before a see-through-hole fix found; nothing to restore.")
         if not messagebox.askyesno(
                 "Restore mesh from before tunnel fix",
                 "Replace aligned_head.ply with the backup made before your first "
-                "tunnel fix?\n\nAll tunnel fixes since then are undone, and the "
+                "see-through-hole fix?\n\nAll hole fixes since then are undone, and the "
                 "mesh will count as not inspected (Step 2)."):
             return
         try:
@@ -1527,7 +1532,7 @@ class HRTFProjectManager(ctk.CTk):
                                  "aligned_head.ply was not changed.")
             return self.log(f"[!] Restore failed: {e}")
         self.log("--> Restored aligned_head.ply from aligned_head.pre_cutpatch.ply "
-                 "(mesh from before the tunnel fix). Aligned check cleared - run "
+                 "(mesh from before the see-through-hole fix). Aligned check cleared - run "
                  "'2. Inspect & Fix Mesh' again.")
         self.update_workflow_state()
 
@@ -1544,7 +1549,7 @@ class HRTFProjectManager(ctk.CTk):
         if state == CleanState.NOT_RUN:
             return ("The aligned mesh has not been inspected (Step 2).\n"
                     "Grading an un-inspected mesh may fail later if it has "
-                    "self-intersections or topological tunnels.")
+                    "self-intersections or see-through holes (tunnels).")
         if state == CleanState.CRITICAL:
             counts = store.read_check_data(MESH_ALIGNED).get("aligned", {}).get("counts", {})
             summary = ", ".join(f"{k}={v}" for k, v in counts.items()

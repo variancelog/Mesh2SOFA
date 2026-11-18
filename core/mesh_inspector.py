@@ -274,8 +274,9 @@ def inspect_mesh(path, *, max_freq_hz=None):
     if counts["genus"] > 0 and counts["holes"] == 0 and counts["boundary_edges"] == 0 and is_two_manifold:
         critical.append({
             "issue": (
-                f"{counts['genus']} topological tunnel/handle(s) (genus={counts['genus']}) - "
-                "scanning artifact; fix by sculpting in Blender"
+                f"{counts['genus']} see-through hole(s) through the mesh "
+                f"(topological tunnels, genus={counts['genus']}) - scanning artifact; "
+                "fix with 'Inspect & Fix Mesh' (Fill the hole / Remove the bridge)"
             ),
             "count": counts["genus"],
         })

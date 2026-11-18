@@ -113,14 +113,116 @@ def apply_with_backup(mesh_path, compute, write):
         raise
 
 
+_PLY_TYPE_SIZE = {"char": 1, "int8": 1, "uchar": 1, "uint8": 1, "short": 2,
+                  "int16": 2, "ushort": 2, "uint16": 2, "int": 4, "int32": 4,
+                  "uint": 4, "uint32": 4, "float": 4, "float32": 4,
+                  "double": 8, "float64": 8}
+
+
+def _check_ply_header_and_size(backup):
+    """Parse the PLY header ourselves and check the file is long enough for the
+    data it announces. A truncated binary PLY crashes VTK's reader natively
+    (segfault, not an exception), so no native reader may see a file that fails
+    this. Raises ValueError with a plain reason."""
+    name = os.path.basename(backup)
+    size = os.path.getsize(backup)
+    with open(backup, "rb") as f:
+        head = f.read(1 << 16)
+    end = head.find(b"end_header")
+    if not head.startswith(b"ply") or end < 0:
+        raise ValueError(f"the backup {name} is not a valid PLY file")
+    nl = head.find(b"\n", end)
+    if nl < 0:
+        raise ValueError(f"the backup {name} has an incomplete header")
+    data_start = nl + 1
+    fmt, elements = None, []          # elements: [name, count, [props]]
+    try:
+        for raw in head[:end].decode("ascii", "replace").splitlines():
+            w = raw.split()
+            if not w:
+                continue
+            if w[0] == "format":
+                fmt = w[1]
+            elif w[0] == "element":
+                elements.append([w[1], int(w[2]), []])
+            elif w[0] == "property" and elements:
+                elements[-1][2].append(w[1:])
+    except (ValueError, IndexError):
+        raise ValueError(f"the backup {name} has a damaged header")
+    counts = {e[0]: e[1] for e in elements}
+    if counts.get("vertex", 0) <= 0:
+        raise ValueError(f"the backup {name} contains no vertices")
+    if counts.get("face", 0) <= 0:
+        raise ValueError(f"the backup {name} contains no faces")
+    if fmt not in ("ascii", "binary_little_endian", "binary_big_endian"):
+        raise ValueError(f"the backup {name} has an unknown PLY format")
+    if fmt == "ascii":
+        if size <= data_start:
+            raise ValueError(f"the backup {name} is truncated")
+        return
+    need = data_start
+    for ename, cnt, props in elements:
+        per = 0
+        min_per = 0
+        for p in props:
+            if p[0] == "list":
+                cs, isz = _PLY_TYPE_SIZE.get(p[1]), _PLY_TYPE_SIZE.get(p[2])
+                if cs is None or isz is None:
+                    raise ValueError(f"the backup {name} has an unknown property type")
+                min_per += cs + (3 * isz if ename == "face" else 0)
+            else:
+                sz = _PLY_TYPE_SIZE.get(p[0])
+                if sz is None:
+                    raise ValueError(f"the backup {name} has an unknown property type")
+                per += sz
+                min_per += sz
+        need += cnt * min_per
+    if size < need:
+        raise ValueError(f"the backup {name} is truncated or damaged "
+                         f"({size} bytes, at least {need} expected)")
+
+
+_READ_CHECK = ("import sys, numpy as np, pyvista as pv\n"
+               "m = pv.PLYReader(sys.argv[1]).read()\n"
+               "sys.exit(0 if np.asarray(m.faces).size > 0 else 3)\n")
+
+
+def _validate_backup(backup):
+    """Raise ValueError with a plain reason unless `backup` is a non-empty,
+    readable mesh with at least one face. Never crashes the calling process:
+    the header/size are checked in pure Python first, and the full read runs in
+    a child interpreter so a native reader crash becomes a ValueError."""
+    import subprocess
+    import sys
+    name = os.path.basename(backup)
+    if os.path.getsize(backup) == 0:
+        raise ValueError(f"the backup {name} is empty (0 bytes)")
+    _check_ply_header_and_size(backup)
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = 0x08000000   # CREATE_NO_WINDOW
+    try:
+        r = subprocess.run([sys.executable, "-I", "-c", _READ_CHECK, backup],
+                           capture_output=True, timeout=60, **kw)
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"reading the backup {name} timed out")
+    if r.returncode == 3:
+        raise ValueError(f"the backup {name} contains no faces")
+    if r.returncode != 0:
+        raise ValueError(f"the backup {name} could not be read as a mesh")
+
+
 def restore_backup(mesh_path):
     """Copy aligned_head.pre_cutpatch.ply back over `mesh_path` atomically
     (tmp + os.replace). The backup is kept (it is still the pre-fix mesh) until
     the next alignment deletes it. Returns True if restored, False if there is
-    no backup."""
+    no backup. Raises ValueError (mesh_path untouched) if the backup is empty or
+    does not parse as a mesh with faces -- never replace a good mesh with a bad
+    backup."""
     backup = backup_path_for(mesh_path)
     if not os.path.exists(backup):
         return False
+    _validate_backup(backup)
     import shutil
     tmp = tmp_path_for(mesh_path)
     try:
