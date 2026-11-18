@@ -262,14 +262,6 @@ def test_single_defect_navigation_is_a_noop(torus, torus_pair):
     assert sel.active == 0
 
 
-def test_choice_summary_names_each_choice(torus, torus_pair):
-    sel = _two_defect_selector(torus, torus_pair)
-    lines = sel.choice_summary()
-    assert len(lines) == 2 and lines[0].startswith("Defect 1: ")
-    title0 = mpv.option_text(torus_pair["labels"]["cut"], 0)[0]
-    assert lines[0] == f"Defect 1: {title0}"
-
-
 def test_see_through_sets_surface_opacity(torus, torus_pair):
     pts, faces = torus
     pl = mock.MagicMock()
@@ -330,8 +322,22 @@ def test_cut_goes_through_job_runner_and_finishes_on_callback(tmp_path, torus, t
     assert events["busy"] == [True]
 
     queued["job"]()                    # "worker thread" does the cut
-    assert events["success"] == 0      # success is reported only from finish()
-    queued["finish"](None)             # GUI-thread tail
+    assert sel.mode == "choose"        # the after-view starts only from finish()
+    queued["finish"](None)             # GUI-thread tail: the result is shown, NOT saved
+    assert sel.mode == "after" and not sel.busy and events["success"] == 0
+    assert open(mesh, "rb").read() == before
+    assert not os.path.exists(ps.backup_path_for(mesh))
+    assert not os.path.exists(tmp_path / "cutpatch_report.json")
+
+    queued.clear()
+    sel.keep()                         # saving also goes through the runner
+    assert sel.busy and open(mesh, "rb").read() == before and "job" in queued
+    sel.keep()                         # Keep is impossible while a worker runs
+    sel.undo()
+    assert sel.mode == "after"
+    queued["job"]()
+    assert events["success"] == 0
+    queued["finish"](None)
     assert events["success"] == 1
     new = pv.read(mesh)
     assert mesh_genus(np.asarray(new.points), new.faces.reshape(-1, 4)[:, 1:]) == 0
@@ -358,7 +364,7 @@ def test_cut_failure_reported_via_finish_leaves_mesh_alone(tmp_path, torus, toru
         err = e
     assert err is not None
     queued["finish"](err)
-    assert busy == [True, False] and not sel.busy
+    assert busy == [True, False] and not sel.busy and sel.mode == "choose"
     assert open(mesh, "rb").read() == before
     assert "unchanged" in statuses[-1] and "NOT applied" in statuses[-1]
     assert sorted(os.listdir(tmp_path))[0].startswith("aligned_head")

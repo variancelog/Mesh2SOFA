@@ -1,6 +1,9 @@
 import sys
 import os
+import re
 import argparse
+import threading
+import time
 import numpy as np
 import pyvista as pv
 from collections import defaultdict, deque
@@ -358,6 +361,9 @@ def _write_ply_tmp(result, path):
     """Write (pts, faces) as a binary PLY to `path` (the temp file of the atomic
     save; it must end in .ply, see project_store.tmp_path_for), then re-read it and confirm the face count, so a truncated write can never
     be os.replace()d over the real mesh."""
+    # NOTE: vtkPLYWriter stores the points as float32, so coordinates are rounded
+    # (~1e-7 relative). That is harmless: faces are index triples, so the topology
+    # (genus, watertightness, components) the cut was verified for cannot change.
     from vtkmodules.vtkIOPLY import vtkPLYWriter
     new_pts, new_faces = result
     faces_pv = np.hstack([np.full((len(new_faces), 1), 3, dtype=np.int64),
@@ -373,6 +379,9 @@ def _write_ply_tmp(result, path):
     if back.n_cells != len(new_faces):
         raise IOError(f"{os.path.basename(path)} read back with {back.n_cells} "
                       f"faces, expected {len(new_faces)}")
+    if back.n_points != len(new_pts):
+        raise IOError(f"{os.path.basename(path)} read back with {back.n_points} "
+                      f"points, expected {len(new_pts)}")
 
 
 # ---------------------------------------------------------------------------
@@ -417,11 +426,91 @@ NO_LOOPS_NOTE = ("A safe way to fix this automatically could not be found. "
                  "hole in Blender or another mesh tool, then re-align.")
 
 CANVAS_HINT = ("Drag = rotate    Z = zoom to defect    H = whole head    "
-               "X = see-through")
+               "X = see-through    P = before / after")
 # Measured on this machine (zzmeshes genus_1/2/3: 5 s / 25 s / 37 s, plus a few
 # seconds to load the mesh). Re-measure if the loop finder changes.
 LOOP_FIND_HINT = "This usually takes under a minute (longer with several defects)."
 CUT_HINT = "This usually takes about 15 seconds. Please don't close this window."
+
+# Stage 3: previews, the after-view and Keep / Undo.
+# B1 switch: if the background previews ever turn out too slow or make the window
+# unresponsive, set this to False -- the viewer then works exactly like stage 2
+# plus the A6 after-view (Apply computes the cut itself, nothing is previewed).
+PREVIEWS_ENABLED = True
+# Longest a single preview cut may take in the child process before it is killed and
+# the cut is done in-process instead. Real cuts take 3-15 s (measured on 75k-170k face
+# heads and the torture meshes), so 10 minutes is only a hung-child guard.
+PREVIEW_CUT_TIMEOUT_S = 600
+
+PREVIEW_PENDING_TEXT = "Preparing preview…"
+PREVIEW_READY_TEXT = "Preview ready"
+PREVIEW_UNAVAILABLE_PREFIX = "Not available — "
+KEEP_LABEL = "Keep & Close"
+UNDO_LABEL = "Undo"
+KEEP_TOOLTIP = ("Saves this result: aligned_head.ply will be replaced by the fixed "
+                "mesh. A backup of the current file is kept as "
+                "aligned_head.pre_cutpatch.ply, and you can restore it from the "
+                "main window.")
+UNDO_TOOLTIP = ("Throw this result away and go back to choosing. Nothing was "
+                "written to disk, so your mesh is unchanged.")
+DISCARD_PROMPT = ("Discard this fix?\nThe fixed mesh has not been saved. Your "
+                  "mesh file is unchanged and will stay as it is.")
+AFTER_NOTE = ("This is the result of the fix. Look around (drag to rotate, P "
+              "switches between before and after), then keep it or undo it.")
+AFTER_LEFT_NOTE = ("The fix worked, but the mesh still has other defect(s). "
+                   "Keeping saves this progress; the app then re-checks the mesh "
+                   "and you can fix the rest.")
+
+
+def fixed_banner(n_left):
+    """Banner for the after-view: "Fixed — N defect(s) left"."""
+    n = int(n_left)
+    return f"Fixed — {n} {'defect' if n == 1 else 'defects'} left"
+
+
+def plain_failure(msg):
+    """Plain-words version of a cut_and_patch failure message (the technical
+    text stays in the tooltip). Never contains the technical class names."""
+    low = (msg or "").lower()
+    if "does not sever" in low or "do not sever" in low:
+        return "cutting here would not separate the surface cleanly"
+    if "removed all faces" in low:
+        return "cutting here would remove the whole surface"
+    if "not watertight" in low:
+        return "the patched surface would have open edges"
+    if "components" in low:
+        return "the cut would split off a separate piece"
+    if "capped genus" in low:
+        return "the patch would bring the hole back"
+    if "face count dropped" in low:
+        return "too much of the surface would be lost"
+    text = re.sub(r"^\w+:\s*", "", (msg or "").strip())
+    return text or "the safety check failed"
+
+
+def close_decision(cut_running, has_unkept, discard_ok):
+    """What the window does when asked to close (pure, so it is unit-tested):
+      "wait"  -- a cut or save is running: refuse, the window closes by itself after;
+      "ask"   -- an unkept fix exists: show the in-window "Discard this fix?" frame;
+      "close" -- go ahead. Closing ALWAYS ends the process promptly: the preview
+                 child is terminated, and view_mesh_problems() hard-exits (rc 0) if a
+                 worker thread that cannot be interrupted (startup checks, loop
+                 finder) is still running after the event loop ends."""
+    if cut_running:
+        return "wait"
+    if has_unkept and not discard_ok:
+        return "ask"
+    return "close"
+
+
+def preview_status_text(state, reason=None):
+    """Card status line for a preview state ("pending"/"running"/"ready"/"failed")."""
+    if state == "ready":
+        return PREVIEW_READY_TEXT
+    if state == "failed":
+        return PREVIEW_UNAVAILABLE_PREFIX + plain_failure(reason)
+    return PREVIEW_PENDING_TEXT
+
 
 # Camera framing for "zoom to defect": distance = DEFECT_ZOOM_SPANS x the span
 # (bounding-box diagonal) of the defect's loops, clamped to a fraction of the
@@ -455,28 +544,43 @@ def remaining_defects_note(shown, genus):
             "after these are fixed.")
 
 
-def option_cards(labels, blocked_reasons, sel):
+def option_cards(labels, blocked_reasons, sel, previews=None):
     """Two card descriptions for one defect.
 
     labels: classifier labels of the AVAILABLE loops (1 or 2 entries);
     blocked_reasons: technical reasons for loops that failed the locate-time
     check (they fill the second card, disabled); sel: index of the selected card.
     A lone available loop has no classifier label (the classifier needs both
-    loops), so it is shown as UNKNOWN: "Option 1"."""
+    loops), so it is shown as UNKNOWN: "Option 1".
+    previews (stage 3): per available loop a (state, reason) pair from the
+    preview cache, or None when previews are off. Each card then carries a
+    "status" line; a failed preview greys the card out and it can't be chosen
+    (its technical reason goes in the tooltip)."""
     cards = []
     for i in range(2):
         if i < len(labels):
             label = labels[i]
             title, sub = option_text(label, i)
             tip = OPTION_TOOLTIP.get(label, UNKNOWN_TOOLTIP)
-            cards.append({"title": title, "subtitle": sub, "enabled": True,
-                          "tooltip": tip, "selected": i == sel})
+            card = {"title": title, "subtitle": sub, "enabled": True,
+                    "tooltip": tip, "selected": i == sel, "status": None}
+            if previews is not None and i < len(previews) and previews[i] is not None:
+                state, reason = previews[i]
+                card["status"] = preview_status_text(state, reason)
+                card["preview_state"] = state
+                if state == "failed":
+                    card["enabled"] = False
+                    card["selected"] = False
+                    card["tooltip"] = (tip + "\n\nPreview check failed: "
+                                       + str(reason))
+            cards.append(card)
         else:
             tip = (blocked_reasons[i - len(labels)]
                    if i - len(labels) < len(blocked_reasons) else
                    "No second loop could be generated for this defect.")
             cards.append({"title": f"Option {i + 1}", "subtitle": UNAVAILABLE_TEXT,
-                          "enabled": False, "tooltip": tip, "selected": False})
+                          "enabled": False, "tooltip": tip, "selected": False,
+                          "status": None})
     return cards
 
 
@@ -545,6 +649,217 @@ def defect_camera_pose(loop_point_arrays, mesh_center, mesh_diag):
     return focal + outward * dist, focal, up, dist
 
 
+def _cut_preview_serve(conn):
+    """Entry point of the preview child process (spawn target; lives in
+    cut_preview_server.py so the child does not import pyvista)."""
+    from cut_preview_server import serve
+    serve(conn)
+
+
+class PreviewCache:
+    """B1: the real single-loop cut_and_patch for every option of every defect,
+    computed in the background on the ORIGINAL arrays and cached (result or
+    failure reason), so the cards can say "Preview ready" / "Not available" and
+    the main view can show what an option would really produce.
+
+    Qt-free and VTK-free (numpy / scipy / pymeshfix only), so it runs in a
+    plain worker thread and is unit-testable. Thread rules:
+      * `pts` / `faces` are only ever READ (cut_and_patch never modifies its
+        inputs); results are stored as read-only arrays, so previews and the
+        Apply worker never share mutable state;
+      * `_compute_lock` serialises the native cut/patch calls (a preview, the
+        single-defect Apply fast path and the multi-defect Apply all take it),
+        so two pymeshfix/pymeshlab runs never overlap;
+      * `stop()` stops the background run BETWEEN options (an option that is
+        already being cut finishes -- it cannot be interrupted); `run()` can be
+        called again later (after Undo) and picks up what is still pending.
+    Keys are (defect index, option index)."""
+
+    def __init__(self, pts, faces, loops_by_key, use_process=False):
+        self.use_process = use_process   # background run in a child process (see below)
+        self._proc = None
+        self._conn = None
+        self._shut = False
+        self.pts = pts
+        self.faces = faces
+        self._loops = dict(loops_by_key)
+        self._entries = {k: {"state": "pending", "result": None, "reason": None}
+                         for k in self._loops}
+        self._state_lock = threading.Lock()
+        self._compute_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._running = 0          # number of run() calls in flight
+
+    # -- queries (any thread) ------------------------------------------------
+    def keys(self):
+        return list(self._loops)
+
+    def state(self, key):
+        with self._state_lock:
+            e = self._entries[key]
+            return e["state"], e["reason"]
+
+    def result(self, key):
+        """(pts, faces) of a ready preview, else None."""
+        with self._state_lock:
+            e = self._entries[key]
+            return e["result"] if e["state"] == "ready" else None
+
+    def pending_keys(self):
+        with self._state_lock:
+            return [k for k, e in self._entries.items() if e["state"] == "pending"]
+
+    def all_done(self):
+        with self._state_lock:
+            return all(e["state"] in ("ready", "failed")
+                       for e in self._entries.values())
+
+    def is_running(self):
+        return self._running > 0
+
+    def summary(self):
+        with self._state_lock:
+            return {f"{k[0]}.{k[1]}": e["state"] for k, e in self._entries.items()}
+
+    # -- control -------------------------------------------------------------
+    def stop(self):
+        self._stop.set()
+
+    def shutdown(self):
+        """Stop for good (the window is closing): no new options start and a
+        preview cut running in the child process is terminated at once."""
+        self._shut = True
+        self._stop.set()
+        self._kill_child()
+
+    # -- child process (background previews only) -------------------------
+    # The native pymeshfix / PyMeshLab calls hold the GIL for seconds, which froze
+    # the GUI in a worker THREAD (2 s timer gaps measured). A child process has no
+    # GIL to fight over, and shutdown() can kill it. Apply's own compute still runs
+    # in-process (get_or_compute), serialised with this through _compute_lock.
+    def _ensure_process(self):
+        if self._proc is not None and self._proc.is_alive():
+            return
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        parent, child = ctx.Pipe()
+        proc = ctx.Process(target=_cut_preview_serve, args=(child,), daemon=True)
+        proc.start()
+        child.close()
+        parent.send((np.asarray(self.pts), np.asarray(self.faces)))
+        self._proc, self._conn = proc, parent
+
+    def _kill_child(self):
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    def _cut_in_process(self, loop):
+        self._ensure_process()
+        self._conn.send(np.asarray(loop))
+        # poll() in short slices (it releases the GIL) so a shutdown or a hung child
+        # is noticed: the wait is capped at PREVIEW_CUT_TIMEOUT_S, after which the
+        # child is killed and the caller falls back to computing in-process.
+        deadline = time.monotonic() + PREVIEW_CUT_TIMEOUT_S
+        while not self._conn.poll(0.25):
+            if self._shut:
+                raise EOFError("preview cancelled")
+            if not self._proc.is_alive():
+                raise EOFError("preview process died")
+            if time.monotonic() > deadline:
+                self._kill_child()
+                raise TimeoutError("preview process timed out")
+        kind, payload = self._conn.recv()
+        if kind == "ok":
+            return payload
+        raise ValueError(payload)
+
+    def resume(self):
+        self._stop.clear()
+
+    def exclusive(self):
+        """Context manager: hold the compute lock (used by the multi-defect
+        Apply so it never overlaps a background preview)."""
+        return self._compute_lock
+
+    # -- work ----------------------------------------------------------------
+    def _compute(self, key, background=False):
+        """Compute one preview (caller holds _compute_lock). Stores and returns
+        the entry's (state, reason). background=True uses the child process when
+        enabled; a cancelled (shutdown) cut leaves the entry pending."""
+        with self._state_lock:
+            e = self._entries[key]
+            if e["state"] in ("ready", "failed"):
+                return e["state"], e["reason"]
+            e["state"] = "running"
+        try:
+            from tunnel_loop_extractor import cut_and_patch
+            res = None
+            if background and self.use_process and not self._shut:
+                try:
+                    res = self._cut_in_process(self._loops[key])
+                except (EOFError, OSError, BrokenPipeError):
+                    if self._shut:                       # terminated on purpose
+                        with self._state_lock:
+                            e["state"] = "pending"
+                        return "pending", None
+                    self.use_process = False             # child died: do it here
+            if res is None:
+                res = cut_and_patch(self.pts, self.faces, self._loops[key])
+            new_pts, new_faces = res
+            new_pts = np.array(new_pts, dtype=np.float64)
+            new_faces = np.array(new_faces, dtype=np.int64)
+            new_pts.flags.writeable = False
+            new_faces.flags.writeable = False
+            with self._state_lock:
+                e.update(state="ready", result=(new_pts, new_faces), reason=None)
+        except Exception as ex:   # noqa: BLE001 - cached as the failure reason
+            with self._state_lock:
+                e.update(state="failed", result=None, reason=str(ex))
+        return self.state(key)
+
+    def run(self, order=None, on_update=None):
+        """Background loop (worker thread): compute each pending option in
+        `order` (default: all keys). Checks the stop flag between options."""
+        with self._state_lock:
+            self._running += 1
+        try:
+            for key in (self.keys() if order is None else order):
+                if self._stop.is_set():
+                    break
+                with self._compute_lock:
+                    if self._stop.is_set():
+                        break
+                    if self.state(key)[0] != "pending":
+                        continue
+                    self._compute(key, background=True)
+                    if self.state(key)[0] == "pending":   # cancelled mid-cut
+                        break
+                if on_update is not None:
+                    try:
+                        on_update(key)
+                    except Exception as ex:   # noqa: BLE001
+                        print(f"[tunnel] preview update callback failed: {ex}",
+                              file=sys.stderr)
+        finally:
+            with self._state_lock:
+                self._running -= 1
+
+    def get_or_compute(self, key):
+        """The cached result for `key`, computing it now if it is not there yet
+        (waits for an in-flight preview first). Raises ValueError with the
+        failure reason if the option cannot be applied. Used by the
+        single-defect Apply, so what was previewed is exactly what is saved."""
+        with self._compute_lock:
+            state, reason = self._compute(key)
+        if state == "failed":
+            raise ValueError(reason)
+        return self.result(key)
+
+
 class TunnelSelector:
     """Interactive fix chooser for see-through holes (topological tunnels).
 
@@ -560,33 +875,54 @@ class TunnelSelector:
     "Option 1" / "Option 2".
 
     The window drives this through select_option / set_active / zoom_to_defect /
-    whole_head / set_see_through; Space / Tab / Shift+Tab / C map to
-    toggle_active_loop / next_handle / prev_handle / request_apply. Hooks:
-      on_change()        -- the selection or active defect changed (panel refresh)
+    whole_head / set_see_through; Space / Tab / Shift+Tab / C / P / Esc map to
+    toggle_active_loop / next_handle / prev_handle / request_apply /
+    toggle_view / undo (in the after-view).
+
+    Flow (stage 3, A6): Apply COMPUTES the cut (worker) and shows the result in
+    the main view -- nothing is written. `mode` is "choose" until a result
+    exists, then "after": the user presses keep() (backup-if-absent + atomic
+    save + sentinel + close) or undo() (result discarded, back to choosing,
+    disk untouched). B1: a PreviewCache computes the real single-loop result
+    of every option in the background; a failed preview makes that option
+    unavailable. Hooks:
+      on_change()        -- anything the panel shows changed (selection, active
+                         defect, busy, mode, preview state): re-sync the panel
       status_cb(text, c) -- show a status line (defaults to a canvas text)
+      busy_cb(bool)      -- a cut / save started or ended
       job_runner(job, finish) -- run `job()` off the GUI thread and call
                          finish(error_or_None) back on it (defaults to running
                          the job inline, which is what the headless tests use).
+      preview_runner(run_fn) -- start the background preview run: call
+                         run_fn(on_update) off the GUI thread and, for each
+                         finished option, deliver on_preview_update(key) on the
+                         GUI thread. None disables previews (unless
+                         `previews=True`, which headless tests use and drive by
+                         hand through self.previews.run()).
     """
 
     def __init__(self, plotter, pts, pairs, mesh_path=None, faces=None,
-                 on_success=None, confirm_cb=None, busy_cb=None,
-                 genus=None, on_change=None, status_cb=None, job_runner=None):
+                 on_success=None, busy_cb=None,
+                 genus=None, on_change=None, status_cb=None, job_runner=None,
+                 previews=None, preview_runner=None, preview_process=False):
         self.pl = plotter
         self.pts = np.asarray(pts)
         self.faces = None if faces is None else np.asarray(faces)
         self.mesh_path = mesh_path
-        self.on_success = on_success  # callable: invoked after a successful fix
-        # confirm_cb(n_defects, on_confirm): shows the confirm step and calls
-        # on_confirm() only if the user confirms. None -> apply without asking
-        # (headless callers only; the window always supplies one).
-        self.confirm_cb = confirm_cb
+        self.on_success = on_success  # callable: invoked after a successful Keep
         self.busy_cb = busy_cb      # busy_cb(bool): window enables/disables the panel
         self.genus = genus          # mesh genus, for the "k of g defects" note
         self.on_change = on_change
         self.status_cb = status_cb
         self.job_runner = job_runner
-        self.busy = False           # True while a cut is running
+        self.preview_runner = preview_runner
+        self.busy = False           # True while a cut or a save is running
+        self.mode = "choose"        # "choose" | "after"
+        self.view = "before"        # what the main view shows: "before" | "after"
+        self.result = None          # (pts, faces) of the unkept fix, mode "after"
+        self.result_genus = None
+        self.kept = False           # True once Keep saved the result
+        self._surface_cache = {}    # key -> pv mesh (main thread only)
         self.see_through = False
         self.center = self.pts.mean(0)
         self.diag = float(np.linalg.norm(self.pts.max(0) - self.pts.min(0)))
@@ -607,6 +943,15 @@ class TunnelSelector:
                                 pr.get("B_reason") or "does not cut cleanly"))
             self.handles.append({"loops": loops, "labels": labels, "sel": 0,
                                  "blocked": blocked})
+        if previews is None:
+            previews = PREVIEWS_ENABLED and preview_runner is not None
+        self.previews = None
+        if previews and self.faces is not None and self.handles:
+            self.previews = PreviewCache(
+                self.pts, self.faces,
+                {(hi, li): lp for hi, h in enumerate(self.handles)
+                 for li, lp in enumerate(h["loops"])},
+                use_process=preview_process)
         self.export_txt = None
         self._label_names = []
         self.redraw()
@@ -625,25 +970,47 @@ class TunnelSelector:
     def defect_title(self):
         return defect_title(self.active, len(self.handles))
 
+    def preview_state(self, hi, li):
+        """(state, reason) of option li of defect hi, or None without previews."""
+        if self.previews is None:
+            return None
+        return self.previews.state((hi, li))
+
+    def option_usable(self, hi, li):
+        """False for a missing option or one whose preview failed a safety check."""
+        h = self.handles[hi]
+        if not 0 <= li < len(h["loops"]):
+            return False
+        st = self.preview_state(hi, li)
+        return st is None or st[0] != "failed"
+
     def cards(self, hi=None):
-        h = self.handles[self.active if hi is None else hi]
-        return option_cards(h["labels"], [r for (_lp, r) in h["blocked"]], h["sel"])
+        hi = self.active if hi is None else hi
+        h = self.handles[hi]
+        pv_states = (None if self.previews is None else
+                     [self.preview_state(hi, li) for li in range(len(h["loops"]))])
+        return option_cards(h["labels"], [r for (_lp, r) in h["blocked"]], h["sel"],
+                            pv_states)
+
+    def can_apply(self):
+        """Every defect still has a usable (not failed-preview) selected option."""
+        return all(self.option_usable(hi, h["sel"])
+                   for hi, h in enumerate(self.handles))
 
     def notes(self):
         h = self.handles[self.active]
-        return defect_notes(h["labels"], len(self.handles), self.genus)
+        notes = defect_notes(h["labels"], len(self.handles), self.genus)
+        for hi, hh in enumerate(self.handles):
+            if not any(self.option_usable(hi, li) for li in range(len(hh["loops"]))):
+                notes.append(
+                    f"Defect {hi + 1} can't be fixed inside the app: neither way "
+                    "passed the safety checks. Use 'Export Loops for Blender' and "
+                    "make the cut there.")
+        return notes
 
     def is_classified(self, hi=None):
         h = self.handles[self.active if hi is None else hi]
         return len(h["labels"]) == 2 and all(lb in OPTION_TITLE for lb in h["labels"])
-
-    def choice_summary(self):
-        """One line per defect naming the chosen option (for the confirm step)."""
-        out = []
-        for hi, h in enumerate(self.handles):
-            title, _ = option_text(h["labels"][h["sel"]], h["sel"])
-            out.append(f"Defect {hi + 1}: {title}")
-        return out
 
     def _iter_loops(self):
         for hi, h in enumerate(self.handles):
@@ -662,7 +1029,8 @@ class TunnelSelector:
     # ------------------------------------------------------------------
     def set_active(self, idx, zoom=True):
         """Make defect `idx` the active one; re-frames the camera on it."""
-        if not 0 <= idx < len(self.handles) or idx == self.active:
+        if (not 0 <= idx < len(self.handles) or idx == self.active
+                or self.mode != "choose" or self.busy):
             return
         self.active = idx
         self.redraw()
@@ -684,7 +1052,9 @@ class TunnelSelector:
         """Choose option `li` (0 or 1) for the active defect. A disabled
         (unavailable) card can never be chosen."""
         h = self.handles[self.active]
-        if 0 <= li < len(h["loops"]) and h["sel"] != li:
+        if self.mode != "choose" or self.busy:
+            return
+        if self.option_usable(self.active, li) and h["sel"] != li:
             h["sel"] = li
             self.redraw()
             self.export()
@@ -694,7 +1064,7 @@ class TunnelSelector:
         """Switch to the other option of the active defect (Space key)."""
         h = self.handles[self.active]
         if len(h["loops"]) > 1:
-            self.select_option((h["sel"] + 1) % len(h["loops"]))
+            self.select_option((h["sel"] + 1) % len(h["loops"]))   # no-op if unusable
 
     def focus_points(self):
         return [list(map(float, self.pts[h["loops"][h["sel"]]].mean(0)))
@@ -734,7 +1104,7 @@ class TunnelSelector:
         self.see_through = bool(on)
         opacity = SEE_THROUGH_OPACITY if self.see_through else MESH_OPACITY
         try:
-            for name in ("surface", "components"):
+            for name in ("surface", "components", "result_surface"):
                 actor = self.pl.actors.get(name)
                 if actor is not None:
                     actor.GetProperty().SetOpacity(opacity)
@@ -774,7 +1144,8 @@ class TunnelSelector:
         if best is None:
             return
         _, hi, li = best
-        if self.handles[hi]["sel"] != li:
+        if (self.mode == "choose" and not self.busy and self.option_usable(hi, li)
+                and self.handles[hi]["sel"] != li):
             self.handles[hi]["sel"] = li
             self.redraw()
             self.export()
@@ -852,6 +1223,7 @@ class TunnelSelector:
         except Exception:
             pass
 
+        self._apply_view(render=False)
         try:
             self.pl.render()
         except Exception:
@@ -872,6 +1244,153 @@ class TunnelSelector:
             print(f"[tunnel] loop export failed: {e}", file=sys.stderr)
             return None
 
+    # ------------------------------------------------------------------
+    # Before / After display (B1 previews and the A6 after-view)
+    #
+    # The original surface actor ("surface", plus the problem overlays and the
+    # rings) is never rebuilt: showing a result adds ONE extra actor
+    # ("result_surface") and hides the original + its overlays; going back just
+    # flips visibility. The camera is never touched.
+    # ------------------------------------------------------------------
+    OVERLAY_PREFIXES = ("sel_loop_", "blocked_loop_", "lbl_", "blocked_lbl_")
+    PROBLEM_ACTORS = ("problem_edges", "components", "si_faces")
+
+    def shown_result(self):
+        """(cache_key, (pts, faces)) of the mesh the 'After' view would show, or
+        None: the unkept fix in the after-view, else the selected option's ready
+        preview."""
+        if self.mode == "after":
+            return ("fix", self.result) if self.result is not None else None
+        if self.previews is None:
+            return None
+        key = (self.active, self.handles[self.active]["sel"])
+        res = self.previews.result(key)
+        return (key, res) if res is not None else None
+
+    def can_toggle_view(self):
+        return self.shown_result() is not None and not self.busy
+
+    def toggle_view(self):
+        """Before / After (key P). After = the unkept fix, or the selected
+        option's cached preview. No-op (with a status line) until one exists."""
+        if self.busy:
+            return
+        if self.shown_result() is None:
+            if self.previews is not None and self.mode == "choose":
+                st = self.preview_state(self.active, self.handles[self.active]["sel"])
+                msg = ("This option can't be previewed."
+                       if st and st[0] == "failed" else
+                       "The preview isn't ready yet - it appears here when it is.")
+                self._status(msg, COLOR_PALE_YELLOW)
+            return
+        self.view = "after" if self.view == "before" else "before"
+        self._apply_view()
+        self._changed()
+
+    def _surface_mesh(self, key, result):
+        mesh = self._surface_cache.get(key)
+        if mesh is None:
+            rpts, rfaces = result
+            cells = np.hstack([np.full((len(rfaces), 1), 3, dtype=np.int64),
+                               np.asarray(rfaces, dtype=np.int64)]).ravel()
+            mesh = pv.PolyData(np.asarray(rpts, dtype=np.float64), cells)
+            try:
+                mesh = mesh.compute_normals(auto_orient_normals=True,
+                                            consistent_normals=True, inplace=False)
+            except Exception:
+                pass
+            self._surface_cache[key] = mesh
+        return mesh
+
+    def _set_visible(self, name, visible):
+        try:
+            actor = self.pl.actors.get(name)
+            if actor is not None:
+                actor.SetVisibility(bool(visible))
+        except Exception:
+            pass
+
+    def _apply_view(self, render=True):
+        """Show the original (surface + overlays + rings) or the 'After' mesh,
+        according to self.view and self.mode."""
+        shown = self.shown_result()
+        if shown is None:
+            self.view = "before"
+        showing_after = self.view == "after" and shown is not None
+        if showing_after:
+            key, result = shown
+            try:
+                opacity = SEE_THROUGH_OPACITY if self.see_through else MESH_OPACITY
+                self.pl.add_mesh(self._surface_mesh(key, result), color="#C8B69F",
+                                 opacity=opacity, show_edges=False,
+                                 ambient=MESH_AMBIENT, diffuse=MESH_DIFFUSE,
+                                 specular=MESH_SPECULAR, name="result_surface",
+                                 reset_camera=False, render=False)
+            except Exception as e:
+                print(f"[tunnel] could not show the result: {e}", file=sys.stderr)
+                self.view = "before"
+                showing_after = False
+        self._set_visible("result_surface", showing_after)
+        self._set_visible("surface", not showing_after)
+        for name in self.PROBLEM_ACTORS:
+            self._set_visible(name, not showing_after)
+        rings = self.mode == "choose" and not showing_after
+        try:
+            names = list(self.pl.actors.keys())
+        except Exception:
+            names = []
+        for name in names:
+            if isinstance(name, str) and name.startswith(self.OVERLAY_PREFIXES):
+                self._set_visible(name, rings)
+        if render:
+            try:
+                self.pl.render()
+            except Exception:
+                pass
+
+    def on_preview_update(self, key):
+        """GUI thread: the preview of option `key` finished (ready or failed).
+        If the option the user had selected just failed, move to the other one;
+        keep the After view in sync; refresh the panel."""
+        hi, li = key
+        st = self.preview_state(hi, li)
+        h = self.handles[hi]
+        if st and st[0] == "failed" and h["sel"] == li and self.mode == "choose":
+            for other in range(len(h["loops"])):
+                if other != li and self.option_usable(hi, other):
+                    h["sel"] = other
+                    self.redraw()
+                    self.export()
+                    self._status(
+                        f"Defect {hi + 1}: that option isn't available "
+                        f"({plain_failure(st[1])}), so the other one is selected.",
+                        COLOR_PALE_YELLOW)
+                    break
+        if self.mode == "choose" and self.view == "after":
+            self._apply_view()          # the selected option's preview may have just landed
+        self._changed()
+
+    def start_previews(self):
+        """Start the background preview run (call once the rings are shown).
+        Priority: the selected option of the active defect, then its other
+        option, then the remaining defects."""
+        if self.previews is None or self.preview_runner is None:
+            return
+        order = []
+        h = self.handles[self.active]
+        order.append((self.active, h["sel"]))
+        order += [(self.active, li) for li in range(len(h["loops"])) if li != h["sel"]]
+        order += [(hi, li) for hi, hh in enumerate(self.handles) if hi != self.active
+                  for li in sorted(range(len(hh["loops"])), key=lambda x: x != hh["sel"])]
+        self.previews.resume()
+        self.preview_runner(lambda cb: self.previews.run(order, on_update=cb))
+
+    def previews_running(self):
+        return self.previews is not None and self.previews.is_running()
+
+    # ------------------------------------------------------------------
+    # Apply -> after-view -> Keep / Undo (A6)
+    # ------------------------------------------------------------------
     def _status(self, text, color):
         if callable(self.status_cb):
             try:
@@ -894,66 +1413,83 @@ class TunnelSelector:
             except Exception:
                 pass
 
+    def has_unkept_result(self):
+        return self.mode == "after" and self.result is not None and not self.kept
+
     def request_apply(self):
-        """C key / Apply button. Opens the confirm step (Cancel changes nothing);
-        ignored while a cut is already running so a queued second press cannot
-        re-cut stale arrays."""
-        if self.busy:
+        """C key / Apply button. Computes the fix and shows it (nothing is
+        written until Keep). Ignored while a cut or save is already running,
+        in the after-view, or when a chosen option failed its preview."""
+        if self.busy or self.mode != "choose":
             return
         if self.faces is None or not self.mesh_path:
             self._status("The fix is unavailable (no mesh data).", COLOR_CUT_INACTIVE)
             return
-        if callable(self.confirm_cb):
-            self.confirm_cb(len(self.handles), self.apply_cut_and_patch)
-        else:
-            self.apply_cut_and_patch()
+        if not self.can_apply():
+            self._status("One of the chosen options isn't available (it failed "
+                         "a safety check), so there is nothing to apply.",
+                         COLOR_CUT_INACTIVE)
+            return
+        self.apply_cut_and_patch()
 
     def apply_cut_and_patch(self):
-        """Cut and patch the chosen loops. Call request_apply() for the
-        user-facing path (it adds the confirm step); this is the confirmed action.
+        """Compute the fix for the chosen option(s) and enter the after-view.
 
-        One chosen loop -> cut_and_patch (per-loop sever check + post-checks);
-        several -> cut_and_patch_loops (union pre-check + post-checks). Backup
-        (only if none exists), cut + checks, temp-file write and os.replace are
-        done by project_store.apply_with_backup: on ANY failure the original
-        aligned_head.ply is untouched and the temp file is removed. The job runs
-        through job_runner (a worker thread in the window) so the panel stays
-        alive; _finish_apply then runs on the GUI thread. On success a sentinel
-        cutpatch_report.json is written so the GUI re-inspects, then on_success()
-        closes the viewer. The exported loops (manual Blender cut) remain the
-        fallback; a failure names the check that failed."""
-        if self.busy:
+        One defect -> the cached verified preview if there is one (else
+        cut_and_patch via the cache, which stores it), so what was previewed is
+        exactly what is kept; several -> cut_and_patch_loops on the chosen set
+        (its union pre-check + post-checks; the after-view shows the real
+        combined result). Previews that have not started are stopped (they resume
+        after Undo); a cut already in flight is waited for through the compute
+        lock, so two native cut/patch runs never overlap. NOTHING is written
+        here: Keep saves. The job runs through job_runner (a worker thread in
+        the window); _finish_apply runs on the GUI thread. On failure the status
+        names the failed check and the mesh is unchanged."""
+        if self.busy or self.mode != "choose":
             return
         if self.faces is None or not self.mesh_path:
             self._status("The fix is unavailable (no mesh data).", COLOR_CUT_INACTIVE)
             return
         self._set_busy(True)
-        cut_loops = [h["loops"][h["sel"]] for h in self.handles]
+        chosen = [(hi, h["sel"]) for hi, h in enumerate(self.handles)]
+        cut_loops = [self.handles[hi]["loops"][li] for hi, li in chosen]
+        holder = {}
+        cache = self.previews
+        if cache is not None:
+            cache.stop()
 
         def job():
-            # Worker-safe: numpy/scipy/pymeshfix + a file write, no rendering.
-            from tunnel_loop_extractor import cut_and_patch, cut_and_patch_loops
-            from project_store import apply_with_backup
-
-            def compute():
-                if len(cut_loops) == 1:
-                    return cut_and_patch(self.pts, self.faces, cut_loops[0])
-                return cut_and_patch_loops(self.pts, self.faces, cut_loops)
-
-            apply_with_backup(self.mesh_path, compute, _write_ply_tmp)
+            # Worker-safe: numpy/scipy/pymeshfix only, no rendering, no writes.
+            from tunnel_loop_extractor import (cut_and_patch, cut_and_patch_loops,
+                                               mesh_genus)
+            if len(cut_loops) == 1 and cache is not None:
+                res = cache.get_or_compute(chosen[0])
+            elif len(cut_loops) == 1:
+                res = cut_and_patch(self.pts, self.faces, cut_loops[0])
+            elif cache is not None:
+                with cache.exclusive():
+                    res = cut_and_patch_loops(self.pts, self.faces, cut_loops)
+            else:
+                res = cut_and_patch_loops(self.pts, self.faces, cut_loops)
+            holder["result"] = res
+            holder["genus"] = int(mesh_genus(np.asarray(res[0]), np.asarray(res[1])))
 
         self._status("Fixing the mesh... " + CUT_HINT, COLOR_PALE_YELLOW)
+
+        def finish(error):
+            self._finish_apply(error, holder)
+
         if callable(self.job_runner):
-            self.job_runner(job, self._finish_apply)
+            self.job_runner(job, finish)
             return
         error = None
         try:
             job()
         except Exception as e:
             error = e
-        self._finish_apply(error)
+        finish(error)
 
-    def _finish_apply(self, error):
+    def _finish_apply(self, error, holder):
         """GUI-thread tail of apply_cut_and_patch (error is None on success)."""
         if error is not None:
             self._set_busy(False)
@@ -962,9 +1498,84 @@ class TunnelSelector:
                 "Use 'Export Loops for Blender' to make this cut manually instead.",
                 "#e6a09f")
             print(f"[tunnel] fix failed: {error}", file=sys.stderr)
+            if self.previews is not None:
+                # A failed single option is now cached as unavailable; the
+                # background previews (stopped by Apply) pick up again.
+                self.on_preview_update_after_failure()
+            return
+        self.result = holder["result"]
+        self.result_genus = holder["genus"]
+        self.mode = "after"
+        self.view = "after"
+        self._set_busy(False)
+        self._apply_view()
+        self._status(fixed_banner(self.result_genus), COLOR_PALE_GREEN)
+        self._changed()
+
+    def on_preview_update_after_failure(self):
+        """After a failed Apply: re-sync the cards (the failed option, if it was
+        a single defect's, is now cached as unavailable and the selection moves
+        to the other option) and restart whatever previews are still pending."""
+        for hi, h in enumerate(self.handles):
+            self.on_preview_update((hi, h["sel"]))
+        if self.previews.pending_keys():
+            self.start_previews()
+
+    def undo(self):
+        """Discard the unkept result and go back to choosing (Undo / Esc in the
+        after-view). Nothing was written, so there is nothing to restore."""
+        if self.busy or self.mode != "after":
+            return
+        self.result = None
+        self.result_genus = None
+        self.mode = "choose"
+        self.view = "before"
+        self._surface_cache.pop("fix", None)
+        self.redraw()                 # rings back, original surface shown
+        self._status("Undone - nothing was changed.", "#ccc")
+        self._changed()
+        if self.previews is not None and self.previews.pending_keys():
+            self.start_previews()
+
+    def keep(self):
+        """Keep & Close: save the already-computed, already-checked result.
+        project_store.apply_with_backup does backup-if-absent -> temp write +
+        re-read check -> os.replace; on ANY failure the original aligned_head.ply
+        is untouched and we stay in the after-view (Undo or retry). On success a
+        sentinel cutpatch_report.json is written so the GUI re-inspects, then
+        on_success() closes the viewer. Impossible while a worker runs."""
+        if self.busy or self.mode != "after" or self.result is None:
+            return
+        self._set_busy(True)
+        result = self.result
+
+        def job():
+            from project_store import apply_with_backup
+            apply_with_backup(self.mesh_path, lambda: result, _write_ply_tmp)
+
+        self._status("Saving the fixed mesh...", COLOR_PALE_YELLOW)
+        if callable(self.job_runner):
+            self.job_runner(job, self._finish_keep)
+            return
+        error = None
+        try:
+            job()
+        except Exception as e:
+            error = e
+        self._finish_keep(error)
+
+    def _finish_keep(self, error):
+        """GUI-thread tail of keep() (error is None on success)."""
+        if error is not None:
+            self._set_busy(False)
+            self._status(
+                f"The fix was NOT saved; your mesh is unchanged.\n{error}\n"
+                "You can try Keep again, or Undo.", "#e6a09f")
+            print(f"[tunnel] save failed: {error}", file=sys.stderr)
             return
 
         # The mesh is now replaced; the rest is best-effort notification.
+        self.kept = True
         from project_store import backup_path_for
         try:
             # Sentinel so the GUI knows the fix ran (not just that the viewer
@@ -979,7 +1590,7 @@ class TunnelSelector:
         except Exception as e:
             print(f"[tunnel] could not write cutpatch_report.json: {e}", file=sys.stderr)
 
-        self._status("Fixed. Closing and re-checking the mesh...", COLOR_PALE_GREEN)
+        self._status("Saved. Closing and re-checking the mesh...", COLOR_PALE_GREEN)
         print("[tunnel] Cut+Patch applied; mesh saved watertight; backup: "
               f"{os.path.basename(backup_path_for(self.mesh_path))}", flush=True)
         # Leave busy=True: the viewer is closing, nothing may re-cut.
@@ -1032,16 +1643,18 @@ def compute_tunnel_data(pts, faces, genus, *, max_pins=5, progress_cb=None):
 
 
 def render_tunnel_data(plotter, data, mesh_path=None, on_success=None,
-                       confirm_cb=None, busy_cb=None, genus=None, on_change=None,
-                       status_cb=None, job_runner=None):
+                       busy_cb=None, genus=None, on_change=None,
+                       status_cb=None, job_runner=None, preview_runner=None,
+                       preview_process=False):
     """Main-thread: draw the computed tunnel data onto the plotter. Returns the
     same dict shape add_tunnel_overlay used (rendered, tight, export_txt,
     n_loops, focus, selector) or False if nothing to draw.
 
     on_success: optional callable forwarded to TunnelSelector — called when
-    Cut+Patch succeeds so the hosting window can close itself and trigger GUI
-    re-validation. genus / on_change / status_cb / job_runner are forwarded to
-    TunnelSelector (panel hooks and the off-thread cut runner).
+    Keep has saved the fix so the hosting window can close itself and trigger GUI
+    re-validation. genus / on_change / status_cb / job_runner / preview_runner
+    are forwarded to TunnelSelector (panel hooks, the off-thread cut runner and
+    the background preview runner).
     """
     mode = data.get("mode")
 
@@ -1049,9 +1662,11 @@ def render_tunnel_data(plotter, data, mesh_path=None, on_success=None,
         pts, faces, pairs = data["pts"], data["faces"], data["pairs"]
         selector = TunnelSelector(plotter, pts, pairs, mesh_path=mesh_path,
                                   faces=faces, on_success=on_success,
-                                  confirm_cb=confirm_cb, busy_cb=busy_cb,
+                                  busy_cb=busy_cb,
                                   genus=genus, on_change=on_change,
-                                  status_cb=status_cb, job_runner=job_runner)
+                                  status_cb=status_cb, job_runner=job_runner,
+                                  preview_runner=preview_runner,
+                                  preview_process=preview_process)
         return {"rendered": True, "tight": True,
                 "export_txt": selector.export_txt, "n_loops": len(pairs),
                 "focus": selector.focus_points(), "selector": selector}
@@ -1135,10 +1750,61 @@ def _orient_camera_to(pl, mesh, issue_point):
         print(f"[tunnel] camera orient skipped: {e}", file=sys.stderr)
 
 
-def _add_static_overlays(pl, mesh, mesh_path):
+def quick_genus(mesh_path):
+    """Genus of the mesh file as PyMeshLab reports it (the same number
+    mesh_inspector.inspect_mesh reports, without its other checks). Worker-safe:
+    no VTK."""
+    import pymeshlab
+    ms = pymeshlab.MeshSet()
+    ms.load_new_mesh(str(mesh_path))
+    topo = ms.get_topological_measures()
+    genus = topo.get("genus", None)
+    if genus is None:
+        genus = ms.compute_topological_measures().get("genus", None)
+    return int(genus) if genus is not None else 0
+
+
+def compute_self_intersections(mesh_path):
+    """(number of self-intersecting faces, their face ids) via PyMeshLab.
+    Worker-safe: no VTK (the old version did this on the GUI thread, with a
+    Python loop over every face)."""
+    import pymeshlab
+    ms = pymeshlab.MeshSet()
+    ms.load_new_mesh(mesh_path)
+    for fname in ('compute_selection_by_self_intersections_per_face',
+                  'select_self_intersecting_faces'):
+        try:
+            ms.apply_filter(fname)
+            break
+        except Exception:
+            continue
+    cm = ms.current_mesh()
+    n_si = int(cm.selected_face_number())
+    ids = []
+    if n_si > 0:
+        try:
+            ids = [int(i) for i in np.flatnonzero(np.asarray(cm.face_selection_array()))]
+        except Exception:
+            ids = [i for i in range(cm.face_number()) if cm.face_is_selected(i)]
+    return n_si, ids
+
+
+def _add_si_overlay(pl, mesh, n_si, face_ids):
+    """Main-thread: draw the self-intersecting faces (yellow); returns the legend line."""
+    if n_si > 0:
+        si_mesh = mesh.extract_cells(face_ids) if face_ids else None
+        if si_mesh is not None and si_mesh.n_points > 0:
+            pl.add_mesh(si_mesh, color="yellow", opacity=MESH_OPACITY, name="si_faces")
+            return f"Yellow faces: {n_si} self-intersection(s)"
+        return f"{n_si} self-intersection(s)"
+    return "[OK] No self-intersecting faces"
+
+
+def _add_static_overlays(pl, mesh, mesh_path, include_si=True):
     """Render the FAST problem overlays (base mesh, boundary/non-manifold edges,
-    components, self-intersections) on the plotter and return legend lines.
-    These are quick, so they go up immediately while the tunnel loops compute."""
+    components, and -- unless include_si is False -- self-intersections) on the
+    plotter and return legend lines. The viewer window passes include_si=False and
+    adds the self-intersection overlay later from a worker's result."""
     # Base mesh — semi-transparent surface. Recompute outward-pointing normals so
     # a mesh with inverted/inconsistent normals (solid black in MeshLab) still
     # shades correctly; ambient light so it can never go fully dark.
@@ -1177,34 +1843,30 @@ def _add_static_overlays(pl, mesh, mesh_path):
     except Exception as e:
         legend_lines.append(f"Component check error: {e}")
 
-    try:
-        import pymeshlab
-        ms = pymeshlab.MeshSet()
-        ms.load_new_mesh(mesh_path)
-        for fname in ('compute_selection_by_self_intersections_per_face',
-                      'select_self_intersecting_faces'):
-            try:
-                ms.apply_filter(fname)
-                break
-            except Exception:
-                continue
-        n_si = ms.current_mesh().selected_face_number()
-        if n_si > 0:
-            face_ids = [i for i in range(mesh.n_cells)
-                        if ms.current_mesh().face_is_selected(i)]
-            si_mesh = mesh.extract_cells(face_ids) if face_ids else None
-            if si_mesh and si_mesh.n_points > 0:
-                pl.add_mesh(si_mesh, color="yellow", opacity=MESH_OPACITY, name="si_faces")
-                legend_lines.append(f"Yellow faces: {n_si} self-intersection(s)")
-        else:
-            legend_lines.append("[OK] No self-intersecting faces")
-    except Exception as e:
-        legend_lines.append(f"Self-intersection check: {e}")
+    if include_si:
+        try:
+            n_si, face_ids = compute_self_intersections(mesh_path)
+            legend_lines.append(_add_si_overlay(pl, mesh, n_si, face_ids))
+        except Exception as e:
+            legend_lines.append(f"Self-intersection check: {e}")
 
     return legend_lines
 
 
-def view_mesh_problems(mesh_path):
+def _workers_running(win):
+    """True if any of the window's QThreads is still running."""
+    ws = [getattr(win, "_prep", None), getattr(win, "_worker", None),
+          getattr(win, "_cut_worker", None)] + list(getattr(win, "_preview_workers", []))
+    for w in ws:
+        try:
+            if w is not None and w.isRunning():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def view_mesh_problems(mesh_path, _script=None):
     """
     Open a PySide6 window showing all detected mesh problems:
       - Red lines    : boundary / non-manifold edges
@@ -1227,7 +1889,28 @@ def view_mesh_problems(mesh_path):
     window_cls = _build_qt_classes()
     win = window_cls(mesh_path)
     win.show()
+    if _script is not None:        # smoke-test hook: _script(win, app) runs once shown
+        from PySide6 import QtCore
+        QtCore.QTimer.singleShot(0, lambda: _script(win, app))
     app.exec()
+    # The window is closed. A QThread that is still running when the process tears
+    # down aborts it (rc 0xC0000409), and the startup checks / loop finder cannot be
+    # interrupted. Nothing is pending on disk at this point (a save refuses to be
+    # closed over, and Keep has already written its sentinel), so make sure the
+    # preview child is gone and leave right away with a clean exit code.
+    try:
+        sel = getattr(win, "_selector", None)
+        if sel is not None and sel.previews is not None:
+            sel.previews.shutdown()
+    except Exception:
+        pass
+    if _workers_running(win):
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)
 
 
 BG_COLOR     = "#1d1d1d"
@@ -1278,6 +1961,22 @@ def _build_qt_classes():
             except BaseException as e:   # noqa: BLE001 - reported on the GUI thread
                 self.error = e
 
+    class _PreviewWorker(QtCore.QThread):
+        """Runs the background preview loop (PreviewCache.run) off the GUI
+        thread. VTK-free; each finished option is announced with `updated`
+        (delivered on the GUI thread)."""
+        updated = QtCore.Signal(object)
+
+        def __init__(self, run_fn):
+            super().__init__()
+            self._run_fn = run_fn
+
+        def run(self):
+            try:
+                self._run_fn(self.updated.emit)
+            except BaseException as e:   # noqa: BLE001
+                print(f"[tunnel] preview worker error: {e}", file=sys.stderr)
+
     class _OptionCard(QtWidgets.QFrame):
         """A clickable, radio-style option card. Never takes keyboard focus."""
         clicked = QtCore.Signal()
@@ -1292,16 +1991,25 @@ def _build_qt_classes():
             self._title = QtWidgets.QLabel("")
             self._sub = QtWidgets.QLabel("")
             self._sub.setWordWrap(True)
-            for w in (self._title, self._sub):
+            self._state = QtWidgets.QLabel("")
+            self._state.setWordWrap(True)
+            for w in (self._title, self._sub, self._state):
                 w.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
                 lay.addWidget(w)
             self._interactive = False
 
-        def set_state(self, title, subtitle, selected, enabled, tooltip, accent):
+        def set_state(self, title, subtitle, selected, enabled, tooltip, accent,
+                      status=None, preview_state=None):
             self._interactive = enabled
             self._title.setText(("●  " if selected else "○  ") + title)
             self._sub.setText(subtitle)
             self._sub.setVisible(bool(subtitle))
+            self._state.setText(status or "")
+            self._state.setVisible(bool(status))
+            self._state.setStyleSheet(
+                "font-size: 11px; background: transparent; color: "
+                + {"ready": "#7fd6a0", "failed": "#e6a09f"}.get(preview_state, "#9aa")
+                + ";")
             self.setToolTip(tooltip or "")
             self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor if enabled
                            else QtCore.Qt.CursorShape.ArrowCursor)
@@ -1326,6 +2034,29 @@ def _build_qt_classes():
                     and self.rect().contains(ev.position().toPoint())):
                 self.clicked.emit()
             super().mouseReleaseEvent(ev)
+
+    class _PrepWorker(QtCore.QThread):
+        """Startup checks that must not block the window (VTK-free, PyMeshLab
+        only): the genus first (it is all the loop finder needs), then the
+        self-intersection count for the yellow overlay."""
+        genus_ready = QtCore.Signal(int, str)       # genus, error text ("" = ok)
+        si_ready = QtCore.Signal(int, object, str)  # n_si, face ids, error text
+
+        def __init__(self, mesh_path):
+            super().__init__()
+            self._path = mesh_path
+
+        def run(self):
+            try:
+                g, err = quick_genus(self._path), ""
+            except Exception as e:   # noqa: BLE001
+                g, err = 0, str(e)
+            self.genus_ready.emit(int(g), err)
+            try:
+                n, ids = compute_self_intersections(self._path)
+                self.si_ready.emit(int(n), ids, "")
+            except Exception as e:   # noqa: BLE001
+                self.si_ready.emit(0, [], str(e))
 
     class _ProblemViewerWindow(QtWidgets.QMainWindow):
         def __init__(self, mesh_path):
@@ -1365,11 +2096,15 @@ def _build_qt_classes():
             # Keyboard state: selector is None until _on_done fires.
             self._selector = None
             self._genus = 0
-            self._confirm_open = False
+            self._prompt_open = False      # the "Discard this fix?" frame
+            self._discard_ok = False       # the user agreed to discard on close
             self._cut_running = False
             self._cut_worker = None
+            self._preview_workers = []
             self._tight_export = None
-            # Space/Tab/Shift+Tab/C/Esc and Z/H/X are intercepted by an
+            self.mesh = None
+            self.legend_lines = []
+            # Space/Tab/Shift+Tab/C/P/Esc and Z/H/X are intercepted by an
             # APPLICATION-level filter (scoped to this window being active)
             # rather than a filter on the 3D widget: keys then work wherever
             # focus is and are consumed before any focused widget or Qt
@@ -1381,12 +2116,12 @@ def _build_qt_classes():
             self._overlay.setStyleSheet(
                 "background: rgba(30,30,30,225); border-radius: 10px;")
             ov_lay = QtWidgets.QVBoxLayout(self._overlay)
-            self._overlay_label = QtWidgets.QLabel("Finding the defect...")
+            self._overlay_label = QtWidgets.QLabel("Checking the mesh…")
             self._overlay_label.setStyleSheet(
                 "font-size: 14px; font-weight: bold; color: white; background: transparent;")
             self._overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self._overlay_label.setWordWrap(True)
-            self._overlay_hint = QtWidgets.QLabel(LOOP_FIND_HINT)
+            self._overlay_hint = QtWidgets.QLabel("")
             self._overlay_hint.setStyleSheet(
                 "font-size: 11px; color: #bbb; background: transparent;")
             self._overlay_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -1397,31 +2132,38 @@ def _build_qt_classes():
             ov_lay.addWidget(self._overlay_label)
             ov_lay.addWidget(self._overlay_hint)
             ov_lay.addWidget(ov_bar)
-            self._overlay.hide()
+            self._overlay.show()
 
-            # Confirm step for the fix (child of plotter_container, like the overlay)
-            self._confirm = QtWidgets.QFrame(self.plotter_container)
-            self._confirm.setStyleSheet(
-                "background: rgba(30,30,30,235); border-radius: 10px;")
-            cf_lay = QtWidgets.QVBoxLayout(self._confirm)
-            cf_lay.setContentsMargins(16, 14, 16, 14)
-            self._confirm_label = QtWidgets.QLabel("")
-            self._confirm_label.setWordWrap(True)
-            self._confirm_label.setStyleSheet(
+            # After-view banner "Fixed - N defect(s) left" (top of the 3D view)
+            self._banner = QtWidgets.QLabel("", self.plotter_container)
+            self._banner.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self._banner.setStyleSheet(
+                "background: rgba(28,110,70,235); color: white; font-size: 16px; "
+                "font-weight: bold; border-radius: 8px; padding: 8px 18px;")
+            self._banner.hide()
+
+            # "Discard this fix?" prompt (an in-window frame, not a QMessageBox, so the
+            # key filter stays in charge; its buttons never take focus)
+            self._prompt = QtWidgets.QFrame(self.plotter_container)
+            self._prompt.setStyleSheet(
+                "background: rgba(30,30,30,240); border-radius: 10px;")
+            pr_lay = QtWidgets.QVBoxLayout(self._prompt)
+            pr_lay.setContentsMargins(16, 14, 16, 14)
+            self._prompt_label = QtWidgets.QLabel(DISCARD_PROMPT)
+            self._prompt_label.setWordWrap(True)
+            self._prompt_label.setStyleSheet(
                 "font-size: 13px; color: white; background: transparent;")
-            cf_lay.addWidget(self._confirm_label)
-            cf_row = QtWidgets.QHBoxLayout()
-            self._btn_confirm_yes = QtWidgets.QPushButton("Apply fix")
-            self._btn_confirm_no = QtWidgets.QPushButton("Cancel")
-            for _b in (self._btn_confirm_yes, self._btn_confirm_no):
+            pr_lay.addWidget(self._prompt_label)
+            pr_row = QtWidgets.QHBoxLayout()
+            self._btn_prompt_yes = QtWidgets.QPushButton("Discard fix")
+            self._btn_prompt_no = QtWidgets.QPushButton("Go back")
+            for _b in (self._btn_prompt_yes, self._btn_prompt_no):
                 _b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-                cf_row.addWidget(_b)
-            cf_lay.addLayout(cf_row)
-            self._btn_confirm_yes.clicked.connect(self._confirm_yes)
-            self._btn_confirm_no.clicked.connect(self._confirm_no)
-            self._confirm_cb_pending = None
-            self._confirm_h = 150
-            self._confirm.hide()
+                pr_row.addWidget(_b)
+            pr_lay.addLayout(pr_row)
+            self._btn_prompt_yes.clicked.connect(self._prompt_yes)
+            self._btn_prompt_no.clicked.connect(self._prompt_no)
+            self._prompt.hide()
 
             # Right: control panel
             panel = QtWidgets.QFrame()
@@ -1487,7 +2229,37 @@ def _build_qt_classes():
             panel_layout.addWidget(self._decision)
             self._decision.hide()
 
-            self._panel_status = QtWidgets.QLabel("Loading mesh...")
+            # --- the after-view (hidden until a fix has been computed) ---
+            self._after = QtWidgets.QWidget()
+            self._after.setStyleSheet("background: transparent;")
+            al = QtWidgets.QVBoxLayout(self._after)
+            al.setContentsMargins(0, 0, 0, 0)
+            al.setSpacing(8)
+            self._lbl_after = QtWidgets.QLabel("")
+            self._lbl_after.setWordWrap(True)
+            self._lbl_after.setStyleSheet(
+                "font-size: 15px; font-weight: bold; color: #7fd6a0; "
+                "background: transparent;")
+            al.addWidget(self._lbl_after)
+            self._lbl_after_note = QtWidgets.QLabel(AFTER_NOTE)
+            self._lbl_after_note.setWordWrap(True)
+            self._lbl_after_note.setStyleSheet(
+                "color: #aaa; font-size: 11px; background: transparent;")
+            al.addWidget(self._lbl_after_note)
+            self._btn_keep = QtWidgets.QPushButton(KEEP_LABEL.replace("&", "&&"))
+            self._btn_keep.setToolTip(KEEP_TOOLTIP)
+            self._btn_keep.setStyleSheet("QPushButton { background-color: #1f8f5c; }"
+                                         "QPushButton:disabled { background-color: #444; }")
+            self._btn_keep.clicked.connect(self._keep)
+            self._btn_undo = QtWidgets.QPushButton(UNDO_LABEL + "  [Esc]")
+            self._btn_undo.setToolTip(UNDO_TOOLTIP)
+            self._btn_undo.clicked.connect(self._undo)
+            al.addWidget(self._btn_keep)
+            al.addWidget(self._btn_undo)
+            panel_layout.addWidget(self._after)
+            self._after.hide()
+
+            self._panel_status = QtWidgets.QLabel("Checking the mesh…")
             self._panel_status.setWordWrap(True)
             self._panel_status.setStyleSheet(
                 "color: #ccc; font-size: 11px; background: transparent;")
@@ -1497,8 +2269,20 @@ def _build_qt_classes():
 
             self._btn_cut = QtWidgets.QPushButton("Apply fix  [C]")
             self._btn_cut.setEnabled(False)
+            self._btn_cut.setToolTip("Computes the fix and shows you the result. "
+                                     "Nothing is saved until you press Keep.")
             self._btn_cut.clicked.connect(self._request_cut)
             panel_layout.addWidget(self._btn_cut)
+
+            self._btn_view = QtWidgets.QPushButton("Show: Before / After  [P]")
+            self._btn_view.setCheckable(True)
+            self._btn_view.setEnabled(False)
+            self._btn_view.setToolTip(
+                "Switch the 3D view between the mesh as it is now (Before) and "
+                "what the selected option would produce (After). The camera "
+                "stays where it is.")
+            self._btn_view.clicked.connect(self._toggle_view)
+            panel_layout.addWidget(self._btn_view)
 
             cam_row = QtWidgets.QHBoxLayout()
             self._btn_zoom = QtWidgets.QPushButton("Zoom to defect [Z]")
@@ -1530,7 +2314,7 @@ def _build_qt_classes():
             panel_layout.addWidget(self._btn_close)
 
             # Status bar: slim label only (overlay is the prominent indicator)
-            self.status_label = QtWidgets.QLabel("Loading mesh...")
+            self.status_label = QtWidgets.QLabel("Checking the mesh…")
             self.statusBar().addWidget(self.status_label, 1)
 
             # Panel widgets must never take keyboard focus: a focused button
@@ -1538,80 +2322,123 @@ def _build_qt_classes():
             # has no other guard. Clicks still work; keys go to the filter.
             for _b in (self._btn_cut, self._btn_zoom, self._btn_whole, self._btn_see,
                        self._btn_export, self._btn_close, self._btn_prev,
-                       self._btn_next, *self._cards):
+                       self._btn_next, self._btn_view, self._btn_keep,
+                       self._btn_undo, *self._cards):
                 _b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
 
             self.plotter.set_background(BG_COLOR)
 
+            # The window shows NOW; everything slow runs after the first paint
+            # (mesh load on the GUI thread is VTK I/O and is quick; the pymeshlab
+            # checks run in _PrepWorker; the loop finder in _TunnelWorker).
+            QtCore.QTimer.singleShot(0, self._start_loading)
+
+        # --- startup ---------------------------------------------------------
+        def _start_loading(self):
             try:
-                self.mesh = pv.read(mesh_path)
+                self.mesh = pv.read(self.mesh_path)
             except Exception as e:
+                self._overlay.hide()
                 self.status_label.setText(f"Error loading mesh: {e}")
                 self._panel_status.setText(f"Error: {e}")
+                self._btn_close.setEnabled(True)
                 return
-
-            self.legend_lines = _add_static_overlays(self.plotter, self.mesh, mesh_path)
+            self.legend_lines = _add_static_overlays(self.plotter, self.mesh,
+                                                     self.mesh_path, include_si=False)
             self._refresh_legend()
             self.plotter.add_key_event('r', lambda: self.plotter.reset_camera())
             self.plotter.reset_camera()
             self._btn_whole.setEnabled(True)
+            self._arrays = _mesh_to_arrays(self.mesh)
+            self._prep = _PrepWorker(self.mesh_path)
+            self._prep.genus_ready.connect(self._on_genus_ready)
+            self._prep.si_ready.connect(self._on_si_ready)
+            self._prep.start()
 
-            # genus check, then launch the worker for the slow loop compute
-            genus = 0
-            try:
-                import mesh_inspector
-                genus = mesh_inspector.inspect_mesh(mesh_path)["counts"].get("genus", 0)
-            except Exception as e:
-                self.legend_lines.append(f"Hole check: {e}")
+        def _on_genus_ready(self, genus, err):
+            if err:
+                self.legend_lines.append(f"Hole check: {err}")
                 self._refresh_legend()
             self._genus = genus
-
             if genus <= 0:
+                self._overlay.hide()
                 self.status_label.setText("No see-through holes.")
                 self._panel_status.setText("No see-through holes detected.")
                 self._btn_close.setEnabled(True)
                 return
-
             first = "Finding the defects..." if genus > 1 else "Finding the defect..."
             self.status_label.setText(first)
             self._panel_status.setText(first)
             self._overlay_label.setText(first)
-            pts, faces = _mesh_to_arrays(self.mesh)
+            self._overlay_hint.setText(LOOP_FIND_HINT)
+            pts, faces = self._arrays
             self._worker = _TunnelWorker(pts, faces, genus)
             self._worker.progress.connect(self._on_progress)
             self._worker.done.connect(self._on_done)
             self._worker.start()
+            self._place_overlays()
             self._overlay.show()
             self._overlay.raise_()
 
+        def _on_si_ready(self, n_si, face_ids, err):
+            try:
+                if err:
+                    self.legend_lines.append(f"Self-intersection check: {err}")
+                else:
+                    self.legend_lines.append(
+                        _add_si_overlay(self.plotter, self.mesh, n_si, face_ids))
+            except Exception as e:
+                self.legend_lines.append(f"Self-intersection check: {e}")
+            self._refresh_legend()
+            self.plotter.render()
+
+        # --- keys ------------------------------------------------------------
         def eventFilter(self, obj, event):
             """Application-level key filter, active only while this window is the
             active window: Space = other option, Tab/Shift+Tab = next/previous
-            defect, C = apply (opens the confirm step), Esc = cancel the confirm
-            step, Z / H / X = zoom to defect / whole head / see-through (no
-            modifiers; none clash with VTK or pyvista defaults: those use
-            q e f p r w s 3 u b v C and the arrow / +/- keys). Auto-repeat is
-            swallowed so holding a key cannot fire twice, and nothing but Esc does
-            anything while a cut runs or the confirm shows."""
+            defect, C = apply (computes the fix and shows it), P = before / after,
+            Esc = Undo in the after-view (or "Go back" on the discard prompt),
+            Z / H / X = zoom to defect / whole head / see-through (no modifiers).
+            None clash with VTK or pyvista defaults (q e f p r w s 3 u b v C and
+            the arrow / +/- keys) because a handled key is consumed HERE: this
+            application-level filter sees it before the VTK widget does -- that
+            is how P (VTK's "pick") is safe to use. P is swallowed even while the
+            loops are still being found. Keep & Close has no key on purpose: saving
+            needs a deliberate click. Auto-repeat is swallowed so holding a key
+            cannot fire twice, and nothing but Esc does anything while a worker
+            runs or the discard prompt shows."""
             if (event.type() == QtCore.QEvent.Type.KeyPress
-                    and self._selector is not None
                     and QtWidgets.QApplication.activeWindow() is self):
                 key = event.key()
                 Qt = QtCore.Qt
-                camera_keys = (Qt.Key.Key_Z, Qt.Key.Key_H, Qt.Key.Key_X)
+                camera_keys = (Qt.Key.Key_Z, Qt.Key.Key_H, Qt.Key.Key_X, Qt.Key.Key_P)
                 handled = (Qt.Key.Key_Space, Qt.Key.Key_Tab, Qt.Key.Key_Backtab,
                            Qt.Key.Key_C, Qt.Key.Key_Escape) + camera_keys
                 if key in camera_keys and event.modifiers() != Qt.KeyboardModifier.NoModifier:
                     return super().eventFilter(obj, event)
-                if key in handled:
+                sel = self._selector
+                if key in handled and (sel is not None or key == Qt.Key.Key_P):
                     if event.isAutoRepeat():
                         return True
-                    sel = self._selector
-                    if self._confirm_open:
+                    if self._prompt_open:
                         if key == Qt.Key.Key_Escape:
-                            self._confirm_no()
+                            self._prompt_no()
                         return True
+                    if sel is None:
+                        return True            # P while loading: swallowed
                     if sel.busy:
+                        return True
+                    if sel.mode == "after":
+                        if key == Qt.Key.Key_Escape:
+                            self._undo()
+                        elif key == Qt.Key.Key_P:
+                            self._toggle_view()
+                        elif key == Qt.Key.Key_Z:
+                            self._zoom_to_defect()
+                        elif key == Qt.Key.Key_H:
+                            self._whole_head()
+                        elif key == Qt.Key.Key_X:
+                            sel.toggle_see_through()
                         return True
                     if key == Qt.Key.Key_Space:
                         sel.toggle_active_loop()
@@ -1621,6 +2448,8 @@ def _build_qt_classes():
                         sel.prev_handle()
                     elif key == Qt.Key.Key_C:
                         self._request_cut()
+                    elif key == Qt.Key.Key_P:
+                        self._toggle_view()
                     elif key == Qt.Key.Key_Z:
                         self._zoom_to_defect()
                     elif key == Qt.Key.Key_H:
@@ -1635,7 +2464,7 @@ def _build_qt_classes():
         # --- panel <-> selector -------------------------------------------
         def _card_clicked(self, i):
             sel = self._selector
-            if sel is None or sel.busy or self._confirm_open:
+            if sel is None or sel.busy or self._prompt_open or sel.mode != "choose":
                 return
             sel.select_option(i)
 
@@ -1654,27 +2483,39 @@ def _build_qt_classes():
             if self._selector is not None and not self._selector.busy:
                 self._selector.set_see_through(bool(checked))
 
+        def _toggle_view(self, *_):
+            if (self._selector is not None and not self._selector.busy
+                    and not self._prompt_open):
+                self._selector.toggle_view()
+            self._refresh_panel()
+
         def _refresh_panel(self):
             """Re-sync every panel widget from the selector (called on any change
-            of selection / active defect / busy / confirm state)."""
+            of selection / active defect / busy / mode / preview state)."""
             sel = self._selector
             if sel is None:
                 return
-            locked = sel.busy or self._confirm_open
+            after = sel.mode == "after"
+            locked = sel.busy or self._prompt_open
             n = len(sel.handles)
+            self._decision.setVisible(not after)
+            self._after.setVisible(after)
+            self._btn_cut.setVisible(not after)
+            self._btn_export.setVisible(not after)
             self._lbl_defect.setText(sel.defect_title())
             for i, spec in enumerate(sel.cards()):
                 self._cards[i].set_state(
                     spec["title"], spec["subtitle"], spec["selected"],
                     spec["enabled"] and not locked, spec["tooltip"],
-                    "red" if spec["selected"] else "blue")
+                    "red" if spec["selected"] else "blue",
+                    spec.get("status"), spec.get("preview_state"))
             self._btn_prev.setEnabled(n > 1 and not locked)
             self._btn_next.setEnabled(n > 1 and not locked)
             self._lbl_rule.setVisible(sel.is_classified())
             notes = sel.notes()
             self._lbl_note.setText("\n\n".join(notes))
             self._lbl_note.setVisible(bool(notes))
-            self._btn_cut.setEnabled(not locked)
+            self._btn_cut.setEnabled(not locked and sel.can_apply())
             self._btn_zoom.setEnabled(not sel.busy)
             self._btn_whole.setEnabled(not sel.busy)
             self._btn_see.setEnabled(not sel.busy)
@@ -1683,63 +2524,81 @@ def _build_qt_classes():
             self._btn_see.blockSignals(False)
             self._btn_export.setEnabled(not sel.busy)
             self._btn_close.setEnabled(not sel.busy)
+            # Before / After toggle (previews in the choose view, the fix in the after-view)
+            self._btn_view.setVisible(after or sel.previews is not None)
+            self._btn_view.setEnabled(sel.can_toggle_view() and not self._prompt_open)
+            self._btn_view.blockSignals(True)
+            self._btn_view.setChecked(sel.view == "after")
+            self._btn_view.setText("Show: " + ("After" if sel.view == "after" else "Before")
+                                   + "  [P]")
+            self._btn_view.blockSignals(False)
+            # After-view
+            if after and sel.result_genus is not None:
+                self._lbl_after.setText(fixed_banner(sel.result_genus))
+                self._lbl_after_note.setText(
+                    AFTER_LEFT_NOTE if sel.result_genus > 0 else AFTER_NOTE)
+                self._banner.setText(fixed_banner(sel.result_genus)
+                                     + ("" if sel.view == "after" else "   (showing Before)"))
+                self._banner.adjustSize()
+            self._banner.setVisible(after)
+            self._btn_keep.setEnabled(after and not locked)
+            self._btn_undo.setEnabled(after and not locked)
+            self._place_overlays()
 
         def _selector_status(self, text, color):
             self._panel_status.setText(text)
             self._panel_status.setStyleSheet(
                 f"color: {color}; font-size: 11px; background: transparent;")
 
-        # --- confirm step -------------------------------------------------
+        # --- apply / keep / undo ------------------------------------------
         def _request_cut(self, *_):
-            if self._selector is None or self._selector.busy or self._confirm_open:
+            if self._selector is None or self._selector.busy or self._prompt_open:
                 return
             self._selector.request_apply()
 
-        def _show_confirm(self, n_defects, on_confirm):
-            from project_store import backup_path_for
-            backup_name = os.path.basename(backup_path_for(self.mesh_path))
-            if os.path.exists(backup_path_for(self.mesh_path)):
-                tail = (f"A backup from before your first fix "
-                        f"({backup_name}) already exists and is kept.")
-            else:
-                tail = (f"The current file is saved as {backup_name} first.")
-            choices = self._selector.choice_summary() if self._selector else []
-            self._confirm_label.setText(
-                f"Apply the fix for {n_defects} defect(s)?\n"
-                + "\n".join(choices) + "\n"
-                f"{os.path.basename(self.mesh_path)} will be replaced. {tail}")
-            self._confirm_h = 150 + 18 * len(choices)
-            self._confirm_cb_pending = on_confirm
-            self._confirm_open = True
+        def _keep(self, *_):
+            sel = self._selector
+            if sel is None or sel.busy or self._prompt_open or self._cut_running:
+                return
+            sel.keep()
+
+        def _undo(self, *_):
+            sel = self._selector
+            if sel is None or sel.busy or self._prompt_open or self._cut_running:
+                return
+            sel.undo()
+
+        # --- discard prompt -----------------------------------------------
+        def _show_prompt(self):
+            self._prompt_open = True
             self._refresh_panel()
             self._place_overlays()
-            self._confirm.show()
-            self._confirm.raise_()
+            self._prompt.show()
+            self._prompt.raise_()
 
-        def _hide_confirm(self):
-            self._confirm_open = False
-            self._confirm_cb_pending = None
-            self._confirm.hide()
+        def _hide_prompt(self):
+            self._prompt_open = False
+            self._prompt.hide()
             self._refresh_panel()
 
-        def _confirm_yes(self):
-            cb = self._confirm_cb_pending
-            self._hide_confirm()
-            if callable(cb):
-                cb()
+        def _prompt_yes(self):
+            self._hide_prompt()
+            self._discard_ok = True
+            self.close()
 
-        def _confirm_no(self):
-            self._hide_confirm()
-            self._selector_status("Cancelled - nothing was changed.", "#ccc")
+        def _prompt_no(self):
+            self._hide_prompt()
 
-        # --- the cut, off the GUI thread ----------------------------------
+        # --- background workers (cut / save / previews) -------------------
         def _set_cut_busy(self, busy):
             """Selector busy hook: lock the panel and show the wait overlay while
-            a cut runs; restore on failure (success leaves it locked: closing)."""
-            self._btn_confirm_yes.setEnabled(not busy)
+            a cut or a save runs; restore afterwards."""
             if busy:
-                self._overlay_label.setText("Fixing the mesh...")
-                self._overlay_hint.setText(CUT_HINT)
+                sel = self._selector
+                saving = sel is not None and sel.mode == "after"
+                self._overlay_label.setText("Saving the fixed mesh..." if saving
+                                            else "Fixing the mesh...")
+                self._overlay_hint.setText("" if saving else CUT_HINT)
                 self._place_overlays()
                 self._overlay.show()
                 self._overlay.raise_()
@@ -1758,11 +2617,31 @@ def _build_qt_classes():
             worker = self._cut_worker
             self._cut_running = False
             finish, self._cut_finish = self._cut_finish, None
-            if worker is not None and worker.error is None:
-                self._overlay_label.setText("Fixed. Closing and re-checking the mesh...")
-                self._overlay_hint.setText("")
             if worker is not None and callable(finish):
                 finish(worker.error)
+
+        def _run_preview_job(self, run_fn):
+            w = _PreviewWorker(run_fn)
+            w.updated.connect(self._on_preview_updated)
+            w.finished.connect(lambda w=w: self._preview_worker_finished(w))
+            self._preview_workers.append(w)
+            w.start()
+
+        def _preview_worker_finished(self, w):
+            if w in self._preview_workers:
+                self._preview_workers.remove(w)
+
+        def _on_preview_updated(self, key):
+            if self._selector is not None:
+                self._selector.on_preview_update(key)
+
+        def _kept(self):
+            """on_success hook: Keep saved the fix; close without asking."""
+            self._overlay_label.setText("Saved. Closing and re-checking the mesh...")
+            self._overlay_hint.setText("")
+            self._overlay.show()
+            self._overlay.raise_()
+            self.close()
 
         def _do_export(self):
             path = (self._selector.export() if self._selector is not None
@@ -1774,14 +2653,25 @@ def _build_qt_classes():
                 self._selector_status("Loop export failed - see the console.", "#e6a09f")
 
         def closeEvent(self, ev):
-            if self._cut_running:
+            sel = self._selector
+            decision = close_decision(
+                self._cut_running,
+                sel is not None and sel.has_unkept_result(),
+                self._discard_ok)
+            if decision == "wait":
                 # Closing mid-write could cost the user the mesh; the window
                 # closes by itself as soon as the fix finishes.
                 ev.ignore()
                 self._selector_status(
-                    "The mesh is being saved - please wait. This window closes "
-                    "by itself when it is done.", COLOR_PALE_YELLOW)
+                    "The mesh is being worked on - please wait. This window "
+                    "closes by itself when it is done.", COLOR_PALE_YELLOW)
                 return
+            if decision == "ask":
+                ev.ignore()
+                self._show_prompt()
+                return
+            if sel is not None and sel.previews is not None:
+                sel.previews.shutdown()     # also terminates a preview cut in the child process
             try:
                 QtWidgets.QApplication.instance().removeEventFilter(self)
             except Exception:
@@ -1793,16 +2683,22 @@ def _build_qt_classes():
             w, h = 440, 110
             self._overlay.setGeometry(
                 (r.width() - w) // 2, (r.height() - h) // 2, w, h)
-            cw, ch = min(520, max(300, r.width() - 40)), self._confirm_h
-            self._confirm.setGeometry(
-                (r.width() - cw) // 2, (r.height() - ch) // 2, cw, ch)
+            pw, ph = min(520, max(300, r.width() - 40)), 130
+            self._prompt.setGeometry(
+                (r.width() - pw) // 2, (r.height() - ph) // 2, pw, ph)
+            if self._banner.isVisible() or self._banner.text():
+                self._banner.adjustSize()
+                bw = min(max(self._banner.width(), 260), max(260, r.width() - 40))
+                self._banner.setGeometry((r.width() - bw) // 2, 14, bw,
+                                         self._banner.height())
             self._overlay.raise_()
-            if self._confirm_open:
-                self._confirm.raise_()
+            self._banner.raise_()
+            if self._prompt_open:
+                self._prompt.raise_()
 
         def resizeEvent(self, ev):
             super().resizeEvent(ev)
-            if hasattr(self, '_confirm'):
+            if hasattr(self, '_prompt'):
                 self._place_overlays()
 
         def _refresh_legend(self):
@@ -1823,13 +2719,14 @@ def _build_qt_classes():
                 "color: #ccc; font-size: 11px; background: transparent;")
 
             found = render_tunnel_data(self.plotter, data, mesh_path=self.mesh_path,
-                                       on_success=self.close,
-                                       confirm_cb=self._show_confirm,
+                                       on_success=self._kept,
                                        busy_cb=self._set_cut_busy,
                                        genus=self._genus,
                                        on_change=self._refresh_panel,
                                        status_cb=self._selector_status,
-                                       job_runner=self._run_cut_job)
+                                       job_runner=self._run_cut_job,
+                                       preview_runner=self._run_preview_job,
+                                       preview_process=True)
             self._selector = found.get("selector") if isinstance(found, dict) else None
             if found and self._selector is not None:
                 sel = self._selector
@@ -1846,6 +2743,7 @@ def _build_qt_classes():
                     f"Found {n} defect{'s' if n != 1 else ''}.")
                 sel.zoom_to_defect()
                 self.plotter.setFocus()
+                sel.start_previews()       # rings first, previews fill in after
             elif found:
                 # Tight (magenta) fallback: the safe in-app check did not pass.
                 self._tight_export = found.get("export_txt")

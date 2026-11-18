@@ -552,7 +552,7 @@ class HRTFProjectManager(ctk.CTk):
         # frame, next to the steps; shown only while the backup made by the
         # first in-app tunnel fix exists (see update_workflow_state).
         self.btn_restore_tunnel = ctk.CTkButton(
-            self.frame_actions, text="Restore mesh from before tunnel fix",
+            self.frame_actions, text="Restore mesh from before hole fix",
             width=240, height=26, fg_color="transparent", border_width=1,
             text_color=("gray10", "#DCE4EE"), command=self.restore_pre_tunnel_mesh)
         self.btn_restore_tunnel.grid(row=0, column=1, padx=10, pady=5, sticky="e")
@@ -1519,7 +1519,7 @@ class HRTFProjectManager(ctk.CTk):
             self.update_workflow_state()
             return self.log("No backup from before a see-through-hole fix found; nothing to restore.")
         if not messagebox.askyesno(
-                "Restore mesh from before tunnel fix",
+                "Restore mesh from before hole fix",
                 "Replace aligned_head.ply with the backup made before your first "
                 "see-through-hole fix?\n\nAll hole fixes since then are undone, and the "
                 "mesh will count as not inspected (Step 2)."):

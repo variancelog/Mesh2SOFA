@@ -123,7 +123,9 @@ def _check_ply_header_and_size(backup):
     """Parse the PLY header ourselves and check the file is long enough for the
     data it announces. A truncated binary PLY crashes VTK's reader natively
     (segfault, not an exception), so no native reader may see a file that fails
-    this. Raises ValueError with a plain reason."""
+    this. Raises ValueError with a plain reason. Returns the number of faces
+    the header declares (the child process that reads the mesh checks it got
+    exactly that many, which catches a truncated ASCII PLY)."""
     name = os.path.basename(backup)
     size = os.path.getsize(backup)
     with open(backup, "rb") as f:
@@ -159,7 +161,16 @@ def _check_ply_header_and_size(backup):
     if fmt == "ascii":
         if size <= data_start:
             raise ValueError(f"the backup {name} is truncated")
-        return
+        # every element row is one text line: a file with fewer data lines than
+        # vertices + faces was cut short
+        with open(backup, "rb") as f:
+            f.seek(data_start)
+            rows = sum(1 for ln in f if ln.strip())
+        if rows < sum(c for _n, c, _p in elements):
+            raise ValueError(f"the backup {name} is truncated or damaged "
+                             f"({rows} data rows, {sum(c for _n, c, _p in elements)} "
+                             "declared)")
+        return counts["face"]
     need = data_start
     for ename, cnt, props in elements:
         per = 0
@@ -180,11 +191,24 @@ def _check_ply_header_and_size(backup):
     if size < need:
         raise ValueError(f"the backup {name} is truncated or damaged "
                          f"({size} bytes, at least {need} expected)")
+    return counts["face"]
 
 
+# argv: backup path, number of faces the header declares. Exit 3 = no faces,
+# 4 = a different number of faces than declared, or empty (<3 vertex) faces: a
+# truncated ASCII PLY reads "fine" but the rows it never reached come back as
+# empty faces; any other non-zero = unreadable / native crash.
 _READ_CHECK = ("import sys, numpy as np, pyvista as pv\n"
                "m = pv.PLYReader(sys.argv[1]).read()\n"
-               "sys.exit(0 if np.asarray(m.faces).size > 0 else 3)\n")
+               "f = np.asarray(m.faces)\n"
+               "if f.size == 0:\n"
+               "    sys.exit(3)\n"
+               "n = i = 0\n"
+               "while i < f.size:\n"
+               "    if f[i] < 3:\n"
+               "        sys.exit(4)  # unread rows come back as empty faces\n"
+               "    i += int(f[i]) + 1; n += 1\n"
+               "sys.exit(0 if i == f.size and n == int(sys.argv[2]) else 4)\n")
 
 
 def _validate_backup(backup):
@@ -197,17 +221,21 @@ def _validate_backup(backup):
     name = os.path.basename(backup)
     if os.path.getsize(backup) == 0:
         raise ValueError(f"the backup {name} is empty (0 bytes)")
-    _check_ply_header_and_size(backup)
+    declared_faces = _check_ply_header_and_size(backup)
     kw = {}
     if os.name == "nt":
         kw["creationflags"] = 0x08000000   # CREATE_NO_WINDOW
     try:
-        r = subprocess.run([sys.executable, "-I", "-c", _READ_CHECK, backup],
+        r = subprocess.run([sys.executable, "-I", "-c", _READ_CHECK, backup,
+                            str(declared_faces)],
                            capture_output=True, timeout=60, **kw)
     except subprocess.TimeoutExpired:
         raise ValueError(f"reading the backup {name} timed out")
     if r.returncode == 3:
         raise ValueError(f"the backup {name} contains no faces")
+    if r.returncode == 4:
+        raise ValueError(f"the backup {name} is truncated or damaged (it holds "
+                         "a different number of faces than its header declares)")
     if r.returncode != 0:
         raise ValueError(f"the backup {name} could not be read as a mesh")
 

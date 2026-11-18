@@ -17,6 +17,7 @@ Stage-1 safety tests for the in-app tunnel fix (Cut+Patch):
     failure) driven with a mock plotter -- no Qt / GL needed.
 """
 import os
+import re
 import sys
 from unittest import mock
 
@@ -483,15 +484,11 @@ def viewer_setup(tmp_path, torus):
     mesh = str(tmp_path / "aligned_head.ply")
     _write_torus_ply(mesh, pts, faces)
     pair = select_cut_loop(pts, faces, 1)[0]
-    events = {"confirm": None, "success": 0, "busy": []}
-
-    def confirm_cb(n, on_confirm):
-        events["confirm"] = (n, on_confirm)
+    events = {"success": 0, "busy": []}
 
     sel = TunnelSelector(mock.MagicMock(), pts, [pair], mesh_path=mesh, faces=faces,
                          on_success=lambda: events.__setitem__("success",
                                                                events["success"] + 1),
-                         confirm_cb=confirm_cb,
                          busy_cb=lambda b: events["busy"].append(b))
     return sel, mesh, events, tmp_path
 
@@ -501,23 +498,37 @@ def _files(tmp_path):
             if not n.startswith("aligned_head_cut")}
 
 
-def test_viewer_cancel_leaves_file_byte_identical(viewer_setup):
+def test_viewer_apply_shows_result_but_writes_nothing(viewer_setup):
+    """Stage 3 (A6): Apply computes the fix and enters the after-view; the file is
+    byte-identical and no backup / temp / sentinel exists until Keep."""
     sel, mesh, events, tmp_path = viewer_setup
     before = open(mesh, "rb").read()
-    sel.request_apply()                          # C / Apply -> confirm step opens
-    assert events["confirm"] is not None and events["confirm"][0] == 1
-    assert open(mesh, "rb").read() == before     # nothing happened yet
-    # Cancel = never calling on_confirm
+    sel.request_apply()                          # C / Apply: no confirm step any more
+    assert sel.mode == "after" and sel.result is not None and not sel.busy
+    assert sel.result_genus == 0
     assert open(mesh, "rb").read() == before
     assert _files(tmp_path) == {"aligned_head.ply"}
-    assert events["success"] == 0
+    assert events["success"] == 0 and events["busy"] == [True, False]
 
 
-def test_viewer_confirm_writes_backup_and_result(viewer_setup):
+def test_viewer_undo_leaves_file_byte_identical(viewer_setup):
     sel, mesh, events, tmp_path = viewer_setup
     before = open(mesh, "rb").read()
     sel.request_apply()
-    events["confirm"][1]()                       # user confirms
+    sel.undo()
+    assert sel.mode == "choose" and sel.result is None
+    assert open(mesh, "rb").read() == before
+    assert _files(tmp_path) == {"aligned_head.ply"}
+    assert events["success"] == 0
+    sel.request_apply()                          # and it can be applied again
+    assert sel.mode == "after"
+
+
+def test_viewer_keep_writes_backup_and_result(viewer_setup):
+    sel, mesh, events, tmp_path = viewer_setup
+    before = open(mesh, "rb").read()
+    sel.request_apply()
+    sel.keep()
     backup = ps.backup_path_for(mesh)
     assert open(backup, "rb").read() == before, "backup = mesh from before the fix"
     new = pv.read(mesh)
@@ -526,10 +537,19 @@ def test_viewer_confirm_writes_backup_and_result(viewer_setup):
     assert _watertight_one_component(faces)
     assert not os.path.exists(ps.tmp_path_for(mesh))
     assert os.path.exists(tmp_path / "cutpatch_report.json")
-    assert events["success"] == 1
+    assert events["success"] == 1 and sel.kept
     assert sel.busy, "stays busy after success so a queued 2nd press cannot re-cut"
     sel.request_apply()                           # ignored while busy
-    assert events["confirm"][1] is not None
+    sel.keep()
+    assert events["success"] == 1
+
+
+def test_viewer_keep_without_result_does_nothing(viewer_setup):
+    sel, mesh, events, tmp_path = viewer_setup
+    before = open(mesh, "rb").read()
+    sel.keep()                                    # nothing computed yet
+    assert open(mesh, "rb").read() == before and _files(tmp_path) == {"aligned_head.ply"}
+    assert events["success"] == 0
 
 
 def test_viewer_failed_check_leaves_original_and_no_backup(viewer_setup):
@@ -540,11 +560,33 @@ def test_viewer_failed_check_leaves_original_and_no_backup(viewer_setup):
     sel.apply_cut_and_patch()
     assert open(mesh, "rb").read() == before
     assert _files(tmp_path) == {"aligned_head.ply"}, "no tmp, no backup, no sentinel"
-    assert events["success"] == 0
+    assert events["success"] == 0 and sel.mode == "choose" and sel.result is None
     assert not sel.busy and events["busy"] == [True, False]
     status = [c.args[0] for c in sel.pl.add_text.call_args_list
               if c.kwargs.get("name") == "patchstatus"]
     assert "does not sever" in status[-1] and "unchanged" in status[-1]
+
+
+def test_viewer_failed_keep_leaves_original_and_stays_in_after_view(viewer_setup,
+                                                                    monkeypatch):
+    sel, mesh, events, tmp_path = viewer_setup
+    before = open(mesh, "rb").read()
+    sel.request_apply()
+    real_replace = os.replace
+
+    def flaky(src, dst):
+        if os.path.abspath(dst) == os.path.abspath(mesh):
+            raise OSError("locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    sel.keep()
+    monkeypatch.undo()
+    assert open(mesh, "rb").read() == before
+    assert _files(tmp_path) == {"aligned_head.ply"}, "tmp and a fresh backup are removed"
+    assert sel.mode == "after" and not sel.busy and events["success"] == 0
+    sel.keep()                                   # retry works
+    assert events["success"] == 1
 
 
 def test_viewer_ignores_second_apply_while_busy(viewer_setup):
@@ -552,7 +594,7 @@ def test_viewer_ignores_second_apply_while_busy(viewer_setup):
     sel.busy = True
     sel.request_apply()
     sel.apply_cut_and_patch()
-    assert events["confirm"] is None
+    assert sel.mode == "choose" and events["busy"] == []
     assert _files(tmp_path) == {"aligned_head.ply"}
 
 
@@ -616,3 +658,61 @@ def test_restore_accepts_valid_binary_ply_in_child(tmp_path):
     r = _restore_in_child(mesh)
     assert r.returncode == 0 and "RESTORED" in r.stdout, r.stdout + r.stderr
     assert open(mesh, "rb").read() == original
+
+
+# A truncated ASCII PLY reads "fine" (VTK returns a partial mesh), so the child
+# process must also check the face count against the header.
+def _ascii_ply_bytes(tmp_path):
+    q = tmp_path / "_ascii_src.ply"
+    pv.Sphere(theta_resolution=12, phi_resolution=12).triangulate().save(
+        str(q), binary=False)
+    data = q.read_bytes()
+    q.unlink()
+    assert b"format ascii" in data[:200]
+    return data
+
+
+def test_restore_rejects_truncated_ascii_ply(tmp_path):
+    data = _ascii_ply_bytes(tmp_path)
+    lines = data.split(b"\n")
+    # drop the last third of the face rows but keep the file non-empty and well-formed
+    keep_n = len(lines) - max(5, len(lines) // 4)
+    truncated = b"\n".join(lines[:keep_n]) + b"\n"
+    mesh = _mesh_file(tmp_path, b"CURRENT-GOOD-MESH")
+    open(ps.backup_path_for(mesh), "wb").write(truncated)
+    with pytest.raises(ValueError) as ei:
+        ps.restore_backup(mesh)
+    assert "backup" in str(ei.value) and ("truncated" in str(ei.value)
+                                          or "fewer" in str(ei.value)
+                                          or "different number" in str(ei.value))
+    assert open(mesh, "rb").read() == b"CURRENT-GOOD-MESH"      # untouched
+    assert not os.path.exists(ps.tmp_path_for(mesh))
+
+
+def test_restore_accepts_complete_ascii_ply(tmp_path):
+    data = _ascii_ply_bytes(tmp_path)
+    mesh = _mesh_file(tmp_path, b"CURRENT-GOOD-MESH")
+    open(ps.backup_path_for(mesh), "wb").write(data)
+    assert ps.restore_backup(mesh) is True
+    assert open(mesh, "rb").read() == data
+
+
+def test_read_check_child_counts_faces_against_the_declared_number(tmp_path):
+    """The child process itself (second line of defence, after the header/row
+    check) fails a partial read: exit 4 when the faces it got != the header's."""
+    import subprocess
+    data = _ascii_ply_bytes(tmp_path)
+    declared = int(re.search(rb"element face (\d+)", data).group(1))
+    lines = data.split(b"\n")
+    truncated = b"\n".join(lines[:len(lines) - max(5, len(lines) // 4)]) + b"\n"
+    full = tmp_path / "full.ply"
+    cut = tmp_path / "cut.ply"
+    full.write_bytes(data)
+    cut.write_bytes(truncated)
+
+    def run(path, n):
+        return subprocess.run([sys.executable, "-I", "-c", ps._READ_CHECK, str(path),
+                               str(n)], capture_output=True, timeout=120).returncode
+    assert run(full, declared) == 0
+    assert run(cut, declared) == 4
+    assert run(full, declared + 1) == 4
