@@ -52,6 +52,86 @@ MESH_GRADED = "graded"
 _CHECK_FILE = {MESH_ALIGNED: "aligned_check.json", MESH_GRADED: "mesh_check.json"}
 
 
+# Backup of the aligned mesh from before the FIRST in-app tunnel fix since the
+# last alignment (one backup, not one per cut). Lives next to aligned_head.ply.
+ALIGNED_MESH_NAME = "aligned_head.ply"
+ALIGNED_BACKUP_NAME = "aligned_head.pre_cutpatch.ply"
+
+
+def backup_path_for(mesh_path):
+    """aligned_head.pre_cutpatch.ply next to the given aligned mesh."""
+    return os.path.join(os.path.dirname(os.path.abspath(mesh_path)), ALIGNED_BACKUP_NAME)
+
+
+def tmp_path_for(mesh_path):
+    """Temp file used while (re)writing the mesh: aligned_head.tmp.ply. It keeps
+    the .ply suffix on purpose -- VTK's PLY writer appends '.ply' to any other
+    name, so 'aligned_head.ply.tmp' would silently end up as
+    'aligned_head.ply.tmp.ply'."""
+    root, ext = os.path.splitext(mesh_path)
+    return root + ".tmp" + ext
+
+
+def _remove_quiet(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def apply_with_backup(mesh_path, compute, write):
+    """Safely replace `mesh_path` with the result of `compute()`.
+
+    1. back the current file up to aligned_head.pre_cutpatch.ply, but only if
+       that backup does not exist yet (it keeps the pre-FIRST-fix mesh);
+    2. result = compute()   (the cut and its checks; may raise);
+    3. write(result, tmp_path_for(mesh_path))  (aligned_head.tmp.ply);
+    4. os.replace(tmp, mesh_path).
+    If any step raises, the original mesh_path is untouched, the temp file is
+    removed, and a backup created by THIS call is removed again (a backup that
+    pre-dates the call is kept). The exception is re-raised. Returns result.
+    """
+    backup = backup_path_for(mesh_path)
+    tmp = tmp_path_for(mesh_path)
+    made_backup = False
+    try:
+        if not os.path.exists(backup):
+            import shutil
+            btmp = tmp_path_for(backup)
+            shutil.copy2(mesh_path, btmp)
+            os.replace(btmp, backup)
+            made_backup = True
+        result = compute()
+        write(result, tmp)
+        os.replace(tmp, mesh_path)
+        return result
+    except BaseException:
+        _remove_quiet(tmp)
+        _remove_quiet(tmp_path_for(backup))
+        if made_backup:
+            _remove_quiet(backup)
+        raise
+
+
+def restore_backup(mesh_path):
+    """Copy aligned_head.pre_cutpatch.ply back over `mesh_path` atomically
+    (tmp + os.replace). The backup is kept (it is still the pre-fix mesh) until
+    the next alignment deletes it. Returns True if restored, False if there is
+    no backup."""
+    backup = backup_path_for(mesh_path)
+    if not os.path.exists(backup):
+        return False
+    import shutil
+    tmp = tmp_path_for(mesh_path)
+    try:
+        shutil.copy2(backup, tmp)
+        os.replace(tmp, mesh_path)
+    except BaseException:
+        _remove_quiet(tmp)
+        raise
+    return True
+
+
 class ProjectStore:
     def __init__(self, project_root, *, mesh_dir=None):
         self.project_root = project_root
@@ -149,6 +229,33 @@ class ProjectStore:
         except FileNotFoundError:
             pass
 
+    # --- aligned-mesh backup (made by the first in-app tunnel fix) ---
+    @property
+    def aligned_mesh_path(self):
+        return os.path.join(self.mesh_dir, ALIGNED_MESH_NAME)
+
+    @property
+    def aligned_backup_path(self):
+        return os.path.join(self.mesh_dir, ALIGNED_BACKUP_NAME)
+
+    def has_aligned_backup(self):
+        return os.path.exists(self.aligned_backup_path)
+
+    def clear_aligned_backup(self):
+        """Delete the pre-tunnel-fix backup. Idempotent. Called on re-alignment
+        (next to clear_check(MESH_ALIGNED)): the backup belongs to the old
+        alignment and must not be restorable over a new one."""
+        _remove_quiet(self.aligned_backup_path)
+
+    def restore_aligned_backup(self):
+        """Put the pre-tunnel-fix mesh back as aligned_head.ply and drop the
+        aligned check so the mesh counts as uninspected (grading then warns).
+        Returns True if a backup was restored."""
+        if not restore_backup(self.aligned_mesh_path):
+            return False
+        self.clear_check(MESH_ALIGNED)
+        return True
+
     # --- mesh-prep artifact management (used on new-mesh import) ---
 
     def _mesh_artifact_paths(self):
@@ -167,6 +274,7 @@ class ProjectStore:
             self._check_path(MESH_GRADED),    # mesh_check.json
             # Step 2 sentinel + loop exports
             os.path.join(md, "cutpatch_report.json"),
+            os.path.join(md, ALIGNED_BACKUP_NAME),
         ]
         # Step 3 graded meshes (e.g. Left_Graded.ply, Right_Graded.ply)
         candidates.extend(_glob.glob(os.path.join(md, "*_Graded.ply")))

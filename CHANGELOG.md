@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Tunnel fixer safety pass: C / Apply in the tunnel viewer now asks for confirmation first, keeps a one-time backup (`aligned_head.pre_cutpatch.ply`, made before the first fix since the last alignment) and saves atomically, so a failed cut can never damage `aligned_head.ply`. New "Restore mesh from before tunnel fix" button in the main window; re-aligning removes the backup.
+- Cut & patch is stricter: exactly 2 holes per loop, union checks for multi-loop cuts, post-patch checks (watertight, 1 component, genus, face count), and the second loop of a pair is verified when the viewer opens (an unusable one is greyed out instead of failing after you press C).
+- Viewer: panel buttons no longer take keyboard focus (Space/Tab/C always work), "Save & Close" renamed "Close without fixing", Export shows the path it wrote, Apply is blocked while a cut is running.
+
 ## v1.7.1 (2026-11-17) — Parallel NumCalc Stability Test with Live Progress
 
 The Step 6 stability test now runs both ears at once instead of one after the other

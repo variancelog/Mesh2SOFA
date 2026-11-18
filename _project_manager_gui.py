@@ -546,6 +546,16 @@ class HRTFProjectManager(ctk.CTk):
         self.lbl_workflow = ctk.CTkLabel(self.frame_actions, text="Workflow Steps", font=("Roboto Medium", 18))
         self.lbl_workflow.grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
+        # Restore (tunnel fix undo). Lives in the header row of the workflow
+        # frame, next to the steps; shown only while the backup made by the
+        # first in-app tunnel fix exists (see update_workflow_state).
+        self.btn_restore_tunnel = ctk.CTkButton(
+            self.frame_actions, text="Restore mesh from before tunnel fix",
+            width=240, height=26, fg_color="transparent", border_width=1,
+            text_color=("gray10", "#DCE4EE"), command=self.restore_pre_tunnel_mesh)
+        self.btn_restore_tunnel.grid(row=0, column=1, padx=10, pady=5, sticky="e")
+        self.btn_restore_tunnel.grid_remove()
+
         # WORKFLOW BUTTONS
         self.btn_align = ctk.CTkButton(self.frame_actions, text="1. Align Mesh", command=self.run_alignment)
         self.btn_align.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
@@ -1443,6 +1453,12 @@ class HRTFProjectManager(ctk.CTk):
         else:
             self.btn_inspect.configure(state="normal", fg_color=COLOR_ACTIVE, hover_color=HOVER_ACTIVE, text_color="black")
 
+        # Restore button: visible only while the pre-tunnel-fix backup exists.
+        if self._store(mesh_path).has_aligned_backup():
+            self.btn_restore_tunnel.grid()
+        else:
+            self.btn_restore_tunnel.grid_remove()
+
         if step_sofa_done:
             self.btn_extras.configure(state="normal", fg_color=COLOR_ACTIVE, text_color="black")
             self.btn_vtk.configure(state="normal", fg_color=COLOR_ACTIVE, text_color="black")
@@ -1486,6 +1502,34 @@ class HRTFProjectManager(ctk.CTk):
         self._pending_inspect_check = True
         cmd = [sys.executable, "-u", inspector, "inspect_aligned", mesh_dir]
         self.run_external_command(cmd)
+
+    def restore_pre_tunnel_mesh(self):
+        """Put aligned_head.pre_cutpatch.ply (the mesh from before the first
+        in-app tunnel fix since the last alignment) back as aligned_head.ply.
+        The aligned check is cleared, so the mesh counts as uninspected and
+        grading will warn until Step 2 is run again."""
+        mesh_dir = self.get_mesh_dir()
+        store = self._store(mesh_dir)
+        if not store.has_aligned_backup():
+            self.update_workflow_state()
+            return self.log("No pre-tunnel-fix backup found; nothing to restore.")
+        if not messagebox.askyesno(
+                "Restore mesh from before tunnel fix",
+                "Replace aligned_head.ply with the backup made before your first "
+                "tunnel fix?\n\nAll tunnel fixes since then are undone, and the "
+                "mesh will count as not inspected (Step 2)."):
+            return
+        try:
+            store.restore_aligned_backup()
+        except Exception as e:
+            messagebox.showerror("Restore failed",
+                                 f"Could not restore the backup:\n{e}\n\n"
+                                 "aligned_head.ply was not changed.")
+            return self.log(f"[!] Restore failed: {e}")
+        self.log("--> Restored aligned_head.ply from aligned_head.pre_cutpatch.ply "
+                 "(mesh from before the tunnel fix). Aligned check cleared - run "
+                 "'2. Inspect & Fix Mesh' again.")
+        self.update_workflow_state()
 
     def _aligned_inspection_warning(self, mesh_dir):
         """Return a warning string if grading should warn the user (mesh never

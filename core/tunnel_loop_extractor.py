@@ -318,46 +318,35 @@ def _smooth_patches(pre_pts, keep_faces, new_pts, new_faces,
     return pts
 
 
-def cut_and_patch(pts, faces, loop_verts, *, maxholesize=2000,
-                smooth_iters=5, smooth_ring=2,
-                taubin_lambda=0.4, taubin_mu=.2):
-    """
-    Delete the 1-ring band of faces touching loop_verts and patchthe two resulting
-    holes, producing a watertight surface with genus reduced by one.
+# Post-patch face-count guard (see _verify_capped). The cut deletes the 1-ring
+# band around each loop and the patch re-tessellates the new caps, so a few
+# faces are legitimately lost or gained; a large drop means pymeshfix discarded
+# real geometry (e.g. a detached component) instead of capping holes.
+# Derivation (2026-11-17): cut+patch was run on the zzmeshes/ genus_1..3 aligned
+# heads (75k / 102k / 168k faces), single loop and all-loops. New/old face-count
+# ratios: 0.9989 / 0.9976 / 1.0002 (single) and 0.9934 / 0.9986 (multi, g2/g3).
+# Worst real drop = 0.66 %. Head-density synthetic fixtures only ever gain faces
+# (the cap remesher upsamples to ~1.5 mm). 2 % is ~3x the worst observed loss
+# yet far below what a lost component removes (the component check catches
+# small pieces; this catches large ones).
+FACE_DROP_TOLERANCE = 0.02
 
-    Returns (new_pts, new_faces) as ndarrays. Raises ValueError if the loop does
-    not cleanly sever a handle (so the caller can fall back to a manual Blender
-    cut). Safety-critical: the result is VERIFIED to (a) sever before capping
-    (genus drops, two holes open, one component) and (b) come out watertight with
-    genus exactly one lower after capping.
 
-    Capping uses pymeshfix which produces cleaner fills than meshing_close_holes.
-    maxholesize is kept for API compatibility but unused (pymeshfix fills all holes).
+def _cap_and_remesh(pts, keep):
+    """Cap every hole of `keep` (the band-deleted faces, original indices) with
+    pymeshfix, then retessellate just the new caps. Returns (new_pts, new_faces).
+
+    remove_smallest_components=False is passed explicitly: pymeshfix's default
+    (True, confirmed in 0.18.1) silently drops every component but the largest,
+    which would hide a detached piece from the post-checks. The callers verify
+    the cut mesh is a single component first, so this changes nothing for valid
+    cuts and lets _verify_capped see any stray piece.
     """
     import pymeshlab
     import pymeshfix
     from scipy.spatial import cKDTree
 
-    pts = np.asarray(pts, dtype=np.float64)
-    faces = np.asarray(faces)
-    g0 = mesh_genus(pts, faces)
-
-    # (a) verify the cut severs before we modify anything
-    chk = _genus_after_cut(pts, faces, loop_verts)
-    if chk is None:
-        raise ValueError("cut_and_patch: deleting the loop band removed all faces")
-    g_cut, n_holes, n_comp = chk
-    if not (g_cut < g0 and n_holes >= 2 and n_comp == 1):
-        raise ValueError(
-            f"cut_and_patch: loop does not sever a handle "
-            f"(genus {g0}->{g_cut}, holes={n_holes}, components={n_comp})")
-
-    # delete the 1-ring band of faces touching the loop
-    loop_set = set(int(x) for x in loop_verts)
-    keep = np.asarray([tri for tri in faces
-                       if not (loop_set & {int(tri[0]), int(tri[1]), int(tri[2])})])
-
-    # record hole-rim coords before filling (used to re-select patchfaces after)
+    # record hole-rim coords before filling (used to re-select patch faces after)
     _ec = {}
     for _tri in keep:
         for _a, _b in ((int(_tri[0]), int(_tri[1])), (int(_tri[1]), int(_tri[2])),
@@ -367,13 +356,12 @@ def cut_and_patch(pts, faces, loop_verts, *, maxholesize=2000,
     _rim = sorted({_v for (_a, _b), _c in _ec.items() if _c == 1 for _v in (_a, _b)})
     bv_coords = pts[_rim]
 
-    # patchthe two holes with pymeshfix
     mf = pymeshfix.MeshFix(pts, keep)
-    mf.repair()
+    mf.repair(remove_smallest_components=False)
     new_pts = np.asarray(mf.points, dtype=np.float64)
     new_faces = np.asarray(mf.faces, dtype=np.int64)
 
-    # select patchfaces (faces touching the rim) for selective remeshing:
+    # select patch faces (faces touching the rim) for selective remeshing:
     # tag rim verts via scalar quality, transfer selection to faces, then dilate+remesh
     _q = np.zeros(len(new_pts), dtype=np.float64)
     _, _rim_new = cKDTree(new_pts).query(bv_coords, k=1)
@@ -385,20 +373,90 @@ def cut_and_patch(pts, faces, loop_verts, *, maxholesize=2000,
     ms.compute_selection_transfer_vertex_to_face(inclusive=False)
     _remesh_selected_caps(ms, target_mm_base=1.5)
     cm = ms.current_mesh()
-    new_pts = np.asarray(cm.vertex_matrix(), dtype=np.float64)
-    new_faces = np.asarray(cm.face_matrix(), dtype=np.int64)
+    return (np.asarray(cm.vertex_matrix(), dtype=np.float64),
+            np.asarray(cm.face_matrix(), dtype=np.int64))
 
-    # (b) verify the capped mesh is watertight with genus reduced by exactly one
-    g_after = mesh_genus(new_pts, new_faces)
-    if g_after != g0 - 1:
+
+def _verify_capped(new_pts, new_faces, expected_genus, n_faces_before, who):
+    """Post-patch safety checks shared by cut_and_patch / cut_and_patch_loops.
+    Raises ValueError naming the failed check: watertight (no boundary edges),
+    exactly 1 component, genus == expected_genus, and the face count has not
+    dropped by more than FACE_DROP_TOLERANCE."""
+    t = _topo_counts(new_faces)
+    if t is None:
+        raise ValueError(f"{who}: post-patch check failed: patched mesh is empty")
+    V, E, F, n_comp, n_bloops = t
+    if n_bloops != 0:
+        raise ValueError(f"{who}: post-patch check failed: mesh not watertight "
+                         f"({n_bloops} open boundary loop(s) remain)")
+    if n_comp != 1:
+        raise ValueError(f"{who}: post-patch check failed: {n_comp} components "
+                         "(a piece was detached or dropped)")
+    g_after = (2 * n_comp - (V - E + F)) // 2
+    if g_after != expected_genus:
+        raise ValueError(f"{who}: post-patch check failed: capped genus {g_after} "
+                         f"!= expected {expected_genus} (the patch re-introduced a "
+                         "handle, or try a different loop)")
+    if len(new_faces) < n_faces_before * (1.0 - FACE_DROP_TOLERANCE):
         raise ValueError(
-            f"cut_and_patch: capped genus {g_after} != expected {g0 - 1} "
-            "(pymeshfix patchre-introduced a handle, or try a different loop)")
+            f"{who}: post-patch check failed: face count dropped "
+            f"{n_faces_before} -> {len(new_faces)} "
+            f"(more than {FACE_DROP_TOLERANCE:.0%})")
 
+
+def _smooth_result(pts, keep, new_pts, new_faces, smooth_iters, smooth_ring,
+                   taubin_lambda, taubin_mu):
     if smooth_iters > 0:
-        new_pts = _smooth_patches(pts, keep, new_pts, new_faces,
-                                  iters=smooth_iters, ring=smooth_ring,
-                                  lam=taubin_lambda, mu=taubin_mu)
+        return _smooth_patches(pts, keep, new_pts, new_faces,
+                               iters=smooth_iters, ring=smooth_ring,
+                               lam=taubin_lambda, mu=taubin_mu)
+    return new_pts
+
+
+def cut_and_patch(pts, faces, loop_verts, *, maxholesize=2000,
+                smooth_iters=5, smooth_ring=2,
+                taubin_lambda=0.4, taubin_mu=.2):
+    """
+    Delete the 1-ring band of faces touching loop_verts and patch the two
+    resulting holes, producing a watertight surface with genus reduced by one.
+
+    Returns (new_pts, new_faces) as ndarrays. Raises ValueError if the loop does
+    not cleanly sever a handle (so the caller can fall back to a manual Blender
+    cut). Safety-critical: the result is VERIFIED to (a) sever before capping
+    (genus drops, EXACTLY two holes open, one component) and (b) come out
+    watertight, one component, genus exactly one lower, with no large face loss
+    (see _verify_capped). The inputs are never modified.
+
+    Capping uses pymeshfix which produces cleaner fills than meshing_close_holes.
+    maxholesize is kept for API compatibility but unused (pymeshfix fills all holes).
+    """
+    pts = np.asarray(pts, dtype=np.float64)
+    faces = np.asarray(faces)
+    g0 = mesh_genus(pts, faces)
+
+    # (a) verify the cut severs before we modify anything
+    chk = _genus_after_cut(pts, faces, loop_verts)
+    if chk is None:
+        raise ValueError("cut_and_patch: deleting the loop band removed all faces")
+    g_cut, n_holes, n_comp = chk
+    if not (g_cut < g0 and n_holes == 2 and n_comp == 1):
+        raise ValueError(
+            f"cut_and_patch: loop does not sever a handle "
+            f"(genus {g0}->{g_cut}, holes={n_holes}, components={n_comp}; "
+            "need exactly 2 holes and 1 component)")
+
+    # delete the 1-ring band of faces touching the loop
+    drop = np.isin(faces, np.asarray(sorted(int(x) for x in loop_verts),
+                                     dtype=np.int64)).any(axis=1)
+    keep = faces[~drop]
+
+    new_pts, new_faces = _cap_and_remesh(pts, keep)
+
+    # (b) verify the capped mesh
+    _verify_capped(new_pts, new_faces, g0 - 1, len(faces), "cut_and_patch")
+
+    new_pts = _smooth_result(pts, keep, new_pts, new_faces, smooth_iters,
+                             smooth_ring, taubin_lambda, taubin_mu)
     return new_pts, new_faces
 
 
@@ -407,78 +465,50 @@ def cut_and_patch_loops(pts, faces, loops, *, maxholesize=2000,
                       taubin_lambda=0.4, taubin_mu=0.2):
     """
     Apply cut_and_patch to SEVERAL chosen loops in one pass: delete every loop's
-    1-ring band, then patchall resulting holes, reducing genus by len(loops).
+    1-ring band, then patch all resulting holes, reducing genus by len(loops).
 
     All loops must be indexed into the SAME `pts` (e.g. the user's per-handle
     choices in the viewer), which is why they are removed together before any
     re-indexing: cutting one at a time would invalidate the other loops' indices.
 
-    Returns (new_pts, new_faces). Raises ValueError if the final genus is not
-    exactly genus(input) - len(loops) (so the caller can fall back to manual
-    Blender cutting). For a single loop, prefer cut_and_patch (stronger per-loop
-    severing check).
+    Checks (all raise ValueError naming the failed check):
+      union pre-check -- cutting all bands together drops genus by exactly
+        len(loops), opens exactly 2*len(loops) holes, leaves 1 component;
+      post-patch -- see _verify_capped (watertight, 1 component, genus
+        g0 - len(loops), face count within tolerance).
+    For a single loop prefer cut_and_patch (same checks plus a per-loop message).
     """
-    import pymeshlab
-    import pymeshfix
-    from scipy.spatial import cKDTree
-
     pts = np.asarray(pts, dtype=np.float64)
     faces = np.asarray(faces)
     loops = [np.asarray(lp) for lp in loops if len(lp)]
     if not loops:
         raise ValueError("cut_and_patch_loops: no loops given")
     g0 = mesh_genus(pts, faces)
+    k = len(loops)
 
     loop_set = set()
     for lp in loops:
         loop_set.update(int(x) for x in lp)
 
-    keep = np.asarray([tri for tri in faces
-                       if not (loop_set & {int(tri[0]), int(tri[1]), int(tri[2])})])
-    if keep.size == 0:
+    # union pre-check, before anything is modified
+    chk = _genus_after_cut(pts, faces, sorted(loop_set))
+    if chk is None:
         raise ValueError("cut_and_patch_loops: deleting the loop bands removed all faces")
-
-    # record hole-rim coords before filling (used to re-select patchfaces after)
-    _ec = {}
-    for _tri in keep:
-        for _a, _b in ((int(_tri[0]), int(_tri[1])), (int(_tri[1]), int(_tri[2])),
-                       (int(_tri[0]), int(_tri[2]))):
-            _k = (min(_a, _b), max(_a, _b))
-            _ec[_k] = _ec.get(_k, 0) + 1
-    _rim = sorted({_v for (_a, _b), _c in _ec.items() if _c == 1 for _v in (_a, _b)})
-    bv_coords = pts[_rim]
-
-    # patchthe holes with pymeshfix
-    mf = pymeshfix.MeshFix(pts, keep)
-    mf.repair()
-    new_pts = np.asarray(mf.points, dtype=np.float64)
-    new_faces = np.asarray(mf.faces, dtype=np.int64)
-
-    # select patchfaces (faces touching the rim) for selective remeshing
-    _q = np.zeros(len(new_pts), dtype=np.float64)
-    _, _rim_new = cKDTree(new_pts).query(bv_coords, k=1)
-    for _i in _rim_new:
-        _q[int(_i)] = 1.0
-    ms = pymeshlab.MeshSet()
-    ms.add_mesh(pymeshlab.Mesh(new_pts, new_faces, v_scalar_array=_q))
-    ms.compute_selection_by_scalar_per_vertex(minq=0.5, maxq=1.5)
-    ms.compute_selection_transfer_vertex_to_face(inclusive=False)
-    _remesh_selected_caps(ms, target_mm_base=1.5)
-    cm = ms.current_mesh()
-    new_pts = np.asarray(cm.vertex_matrix(), dtype=np.float64)
-    new_faces = np.asarray(cm.face_matrix(), dtype=np.int64)
-
-    g_after = mesh_genus(new_pts, new_faces)
-    expected = g0 - len(loops)
-    if g_after != expected:
+    g_cut, n_holes, n_comp = chk
+    if not (g_cut == g0 - k and n_holes == 2 * k and n_comp == 1):
         raise ValueError(
-            f"cut_and_patch_loops: capped genus {g_after} != expected {expected} "
-            "(check the chosen loops, or fall back to a manual Blender cut)")
+            f"cut_and_patch_loops: the chosen loops do not sever cleanly together "
+            f"(genus {g0}->{g_cut}, expected {g0 - k}; holes={n_holes}, expected "
+            f"{2 * k}; components={n_comp}, expected 1)")
 
-    if smooth_iters > 0:
-        new_pts = _smooth_patches(pts, keep, new_pts, new_faces,
-                                  iters=smooth_iters, ring=smooth_ring,
-                                  lam=taubin_lambda, mu=taubin_mu)
+    drop = np.isin(faces, np.asarray(sorted(loop_set), dtype=np.int64)).any(axis=1)
+    keep = faces[~drop]
+
+    new_pts, new_faces = _cap_and_remesh(pts, keep)
+    _verify_capped(new_pts, new_faces, g0 - k, len(faces), "cut_and_patch_loops")
+
+    new_pts = _smooth_result(pts, keep, new_pts, new_faces, smooth_iters,
+                             smooth_ring, taubin_lambda, taubin_mu)
     return new_pts, new_faces
 
 
@@ -592,10 +622,10 @@ def _loop_len(pts, lp):
 
 
 def _severs(pts, faces, lp, g0):
-    """A loop severs a handle iff cutting it drops genus, opens >=2 holes,
+    """A loop severs a handle iff cutting it drops genus, opens EXACTLY 2 holes,
     and keeps the surface in ONE piece (separating loops make 2 components)."""
     res = _genus_after_cut(pts, faces, np.asarray(lp))
-    return res is not None and res[0] < g0 and res[1] >= 2 and res[2] == 1
+    return res is not None and res[0] < g0 and res[1] == 2 and res[2] == 1
 
 
 def _tighten_loop(pts, faces, loop, G, g0, rounds=6):

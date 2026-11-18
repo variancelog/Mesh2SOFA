@@ -352,6 +352,10 @@ def select_cut_loop(pts, faces, genus, *, max_loops=5, progress_cb=None):
        "labels": {"cut": "TUNNEL"|"HANDLE"|"UNKNOWN", "avoid": ...|None},
        "linking": {"cut": (lk_in, lk_out)|None, "avoid": ...|None}}
     If B cannot be generated, falls back to {"cut": A, "avoid": None, ...}.
+    Loop B is verified at locate time with the same severing check as A (genus
+    drop, exactly 2 holes, 1 component). A B that fails is NOT offered: the
+    entry is {"cut": A, "avoid": None, "B": None, "B_unavailable": B,
+    "B_reason": <why>, ...} so the viewer can draw it greyed and explain.
     If classification is AMBIGUOUS, cut=A / avoid=B with labels "UNKNOWN".
     """
     def _emit(msg):
@@ -364,6 +368,7 @@ def select_cut_loop(pts, faces, genus, *, max_loops=5, progress_cb=None):
     pts = np.asarray(pts, dtype=np.float64)
     faces = np.asarray(faces)
     mesh_pv = _as_pv(pts, faces)
+    g0 = mesh_genus(pts, faces)
     located = locate_cut_loops(pts, faces, genus, max_loops=max_loops,
                                progress_cb=progress_cb, with_loose=True)
     vn = mine = None
@@ -378,6 +383,21 @@ def select_cut_loop(pts, faces, genus, *, max_loops=5, progress_cb=None):
             # Tight loop A too degenerate for fan-split; retry on the loose loop.
             _emit(f"Dual loop retry on loose progenitor ({len(loose)} verts)...")
             B = dual_crossing_loop(pts, faces, loose)
+        if B is not None and not _severs(pts, faces, B, g0):
+            # Loop B was built by dual_crossing_loop and never verified; if
+            # cutting it would not sever cleanly (genus drop, exactly 2 holes,
+            # 1 component) it must not be offered, or the user would only find
+            # out after pressing C. Keep it for display only (B_unavailable).
+            res = _genus_after_cut(pts, faces, np.asarray(B))
+            why = ("cutting it removes every face" if res is None else
+                   f"cutting it gives genus {g0}->{res[0]}, {res[1]} hole(s), "
+                   f"{res[2]} component(s); need a genus drop, exactly 2 holes, "
+                   "1 component")
+            results.append({"cut": A, "avoid": None, "A": A, "B": None,
+                            "B_unavailable": B, "B_reason": why,
+                            "labels": {"cut": "UNKNOWN", "avoid": None},
+                            "linking": {"cut": None, "avoid": None}})
+            continue
         if B is None:
             results.append({"cut": A, "avoid": None, "A": A, "B": None,
                             "labels": {"cut": "UNKNOWN", "avoid": None},

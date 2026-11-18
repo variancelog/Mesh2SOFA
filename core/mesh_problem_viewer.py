@@ -21,6 +21,7 @@ COLOR_CUT_INACTIVE = "#CC6161"
 COLOR_IGNORE_ACTIVE = "#546EB0" 
 COLOR_IGNORE_INACTIVE = "#7483B0"
 COLOR_MESH = "#AFA79C"
+COLOR_BLOCKED = "#6E6E6E"   # loop B that failed the locate-time sever check
 
 # --- OTHER COLORS
 COLOR_PALE_YELLOW = "#e6d79f"
@@ -348,12 +349,34 @@ def _add_labels_with_leaders(plotter, targets, anchors, labels, color, name):
             pass
 
 
+def _write_ply_tmp(result, path):
+    """Write (pts, faces) as a binary PLY to `path` (the temp file of the atomic
+    save; it must end in .ply, see project_store.tmp_path_for), then re-read it and confirm the face count, so a truncated write can never
+    be os.replace()d over the real mesh."""
+    from vtkmodules.vtkIOPLY import vtkPLYWriter
+    new_pts, new_faces = result
+    faces_pv = np.hstack([np.full((len(new_faces), 1), 3, dtype=np.int64),
+                          np.asarray(new_faces, dtype=np.int64)]).ravel()
+    out = pv.PolyData(np.asarray(new_pts, dtype=np.float64), faces_pv)
+    w = vtkPLYWriter()
+    w.SetFileName(path)
+    w.SetInputData(out)
+    w.SetFileTypeToBinary()
+    if not w.Write() or w.GetErrorCode():
+        raise IOError(f"could not write {os.path.basename(path)}")
+    back = pv.PLYReader(path).read()   # explicit reader: any extension
+    if back.n_cells != len(new_faces):
+        raise IOError(f"{os.path.basename(path)} read back with {back.n_cells} "
+                      f"faces, expected {len(new_faces)}")
+
+
 class TunnelSelector:
     """Interactive cut-loop chooser.
 
     Each handle has up to two candidate cut loops (the dual pair). One is shown
-    as RED 'Cut and Patch Tunnel', the other BLUE 'Ignore'. Clicking near a loop makes it the
-    chosen cut loop for its handle; the chosen loops are re-exported on every
+    as RED (cut), the other BLUE (the other member of the pair; not cut). A
+    loop B that failed the locate-time sever check is drawn grey and cannot be
+    selected. Space toggles; the chosen loops are re-exported on every
     change. Each loop carries its topological HANDLE/TUNNEL label from
     select_cut_loop's linking-number classifier (reliable — settled 2026-07-04):
     TUNNEL = cutting fills the see-through channel flush; HANDLE = cutting
@@ -366,16 +389,24 @@ class TunnelSelector:
                    "HANDLE": "HANDLE: severs solid bridge"}
 
     def __init__(self, plotter, pts, pairs, mesh_path=None, faces=None,
-                 on_success=None):
+                 on_success=None, confirm_cb=None, busy_cb=None):
         self.pl = plotter
         self.pts = np.asarray(pts)
         self.faces = None if faces is None else np.asarray(faces)
         self.mesh_path = mesh_path
         self.on_success = on_success  # callable: invoked after a successful Cut+Patch
+        # confirm_cb(n_defects, on_confirm): shows the confirm step and calls
+        # on_confirm() only if the user confirms. None -> apply without asking
+        # (headless callers only; the window always supplies one).
+        self.confirm_cb = confirm_cb
+        self.busy_cb = busy_cb      # busy_cb(bool): window enables/disables Apply
+        self.busy = False           # True while a cut is running
         self.center = self.pts.mean(0)
         self.diag = float(np.linalg.norm(self.pts.max(0) - self.pts.min(0)))
         self.active = 0             # keyboard-active handle index (Task 4)
-        self.handles = []           # each: {"loops": [idx arrays], "labels": [str], "sel": int}
+        # each: {"loops": [idx arrays], "labels": [str], "sel": int,
+        #        "blocked": [(idx array, reason)]}
+        self.handles = []
         for pr in pairs:
             pr_labels = pr.get("labels") or {}
             loops = [np.asarray(pr["cut"])]
@@ -383,10 +414,21 @@ class TunnelSelector:
             if pr.get("avoid") is not None:
                 loops.append(np.asarray(pr["avoid"]))
                 labels.append(pr_labels.get("avoid") or "UNKNOWN")
-            self.handles.append({"loops": loops, "labels": labels, "sel": 0})
+            blocked = []
+            if pr.get("B_unavailable") is not None:
+                blocked.append((np.asarray(pr["B_unavailable"]),
+                                pr.get("B_reason") or "does not cut cleanly"))
+            self.handles.append({"loops": loops, "labels": labels, "sel": 0,
+                                 "blocked": blocked})
         self.export_txt = None
         self.redraw()
         self.export()
+
+    def unavailable_messages(self):
+        """Short user-facing notes for second loops that are not offered."""
+        return [f"Defect {hi + 1}: the second loop is unavailable ({reason})."
+                for hi, h in enumerate(self.handles)
+                for (_lp, reason) in h["blocked"]]
 
     def _iter_loops(self):
         for hi, h in enumerate(self.handles):
@@ -486,6 +528,16 @@ class TunnelSelector:
                 [cut_label], COLOR_CUT_ACTIVE if is_active else COLOR_CUT_INACTIVE,
                 f'sel_cut_lbl_{hi}')
 
+            # Loop B that failed the sever check: grey, label only, never selectable.
+            for bi, (blp, _reason) in enumerate(h["blocked"]):
+                _draw_loop(self.pl, self.pts[blp], COLOR_BLOCKED,
+                           f'blocked_loop_{hi}_{bi}', width=8)
+                bc = self.pts[blp].mean(0)
+                _add_labels_with_leaders(
+                    self.pl, [bc], [_label_anchor(bc, self.center, self.diag, -1)],
+                    ['Unavailable\n(would not cut cleanly)'], COLOR_BLOCKED,
+                    f'blocked_lbl_{hi}_{bi}')
+
             # Avoid-loop labels (with their HANDLE/TUNNEL roles).
             at, aa, al = [], [], []
             for li, lp in enumerate(h["loops"]):
@@ -518,15 +570,19 @@ class TunnelSelector:
             pass
 
     def export(self):
+        """Write the currently-selected loops for a manual Blender cut. Returns
+        the path of the .txt written (also kept in self.export_txt), or None."""
         if not self.mesh_path:
-            return
+            return None
         try:
             from tunnel_loop_locator import export_loops_for_blender
             cut_loops = [h["loops"][h["sel"]] for h in self.handles]
             prefix = os.path.splitext(self.mesh_path)[0] + "_cut"
             _, self.export_txt = export_loops_for_blender(self.pts, cut_loops, prefix)
+            return self.export_txt
         except Exception as e:
             print(f"[tunnel] loop export failed: {e}", file=sys.stderr)
+            return None
 
     def _status(self, text, color):
         try:
@@ -536,53 +592,96 @@ class TunnelSelector:
         except Exception:
             pass
 
-    def apply_cut_and_patch(self):
-        """Delete the chosen cut loops' bands and patch the holes in-app, producing
-        a watertight genus-0 mesh. Saves over mesh_path, writes a sentinel
-        cutpatch_report.json so the GUI can trigger auto re-inspect + repair, then
-        calls self.on_success() to close the viewer. Falls back to the exported
-        loops (manual Blender) on any failure, leaving the original file untouched."""
+    def _set_busy(self, busy):
+        self.busy = busy
+        if callable(self.busy_cb):
+            try:
+                self.busy_cb(busy)
+            except Exception:
+                pass
+
+    def request_apply(self):
+        """C key / Apply button. Opens the confirm step (Cancel changes nothing);
+        ignored while a cut is already running so a queued second press cannot
+        re-cut stale arrays."""
+        if self.busy:
+            return
         if self.faces is None or not self.mesh_path:
             self._status("Cut+Patch unavailable (no mesh data)", COLOR_CUT_INACTIVE)
             return
+        if callable(self.confirm_cb):
+            self.confirm_cb(len(self.handles), self.apply_cut_and_patch)
+        else:
+            self.apply_cut_and_patch()
+
+    def apply_cut_and_patch(self):
+        """Cut and patch the chosen loops in-app. Call request_apply() for the
+        user-facing path (it adds the confirm step); this is the confirmed action.
+
+        One chosen loop -> cut_and_patch (per-loop sever check + post-checks);
+        several -> cut_and_patch_loops (union pre-check + post-checks). Backup
+        (only if none exists), cut + checks, temp-file write and os.replace are
+        done by project_store.apply_with_backup: on ANY failure the original
+        aligned_head.ply is untouched and the temp file is removed. On success a
+        sentinel cutpatch_report.json is written so the GUI re-inspects, then
+        on_success() closes the viewer. The exported loops (manual Blender cut)
+        remain the fallback; a failure names the check that failed."""
+        if self.busy:
+            return
+        if self.faces is None or not self.mesh_path:
+            self._status("Cut+Patch unavailable (no mesh data)", COLOR_CUT_INACTIVE)
+            return
+        self._set_busy(True)
         try:
-            from tunnel_loop_extractor import cut_and_patch_loops
+            from tunnel_loop_extractor import cut_and_patch, cut_and_patch_loops
+            from project_store import apply_with_backup, backup_path_for
             cut_loops = [h["loops"][h["sel"]] for h in self.handles]
+
+            def compute():
+                if len(cut_loops) == 1:
+                    return cut_and_patch(self.pts, self.faces, cut_loops[0])
+                return cut_and_patch_loops(self.pts, self.faces, cut_loops)
+
             self._status("Repairing mesh tunnels...", COLOR_PALE_YELLOW)
-            new_pts, new_faces = cut_and_patch_loops(self.pts, self.faces, cut_loops)
+            try:   # let the status text paint before the (blocking) cut
+                from PySide6 import QtWidgets
+                if QtWidgets.QApplication.instance() is not None:
+                    QtWidgets.QApplication.processEvents()
+            except Exception:
+                pass
+            apply_with_backup(self.mesh_path, compute, _write_ply_tmp)
+        except Exception as e:
+            self._set_busy(False)
+            self._status(
+                f"Cut+Patch NOT applied; your mesh is unchanged.\n{e}\n"
+                "Use the exported loop for a manual Blender cut instead.",
+                "#e6a09f")
+            print(f"[tunnel] Cut+Patch failed: {e}", file=sys.stderr)
+            return
 
-            faces_pv = np.hstack(
-                [np.full((len(new_faces), 1), 3, dtype=np.int64),
-                 new_faces.astype(np.int64)]).ravel()
-            out = pv.PolyData(new_pts, faces_pv)
-            out.save(self.mesh_path)
-
-            # Write a sentinel file so the GUI knows Cut+Patch ran (not just
-            # that the viewer was closed). The GUI picks this up via
-            # _after_tunnel_viewer() and runs repair_aligned automatically.
+        # The mesh is now replaced; the rest is best-effort notification.
+        try:
+            # Sentinel so the GUI knows Cut+Patch ran (not just that the viewer
+            # was closed); picked up by _after_tunnel_viewer(), which runs
+            # repair_aligned automatically.
             import json as _json
             sentinel = os.path.join(os.path.dirname(self.mesh_path),
                                     "cutpatch_report.json")
             with open(sentinel, "w") as _f:
                 _json.dump({"applied": True,
                             "mesh": os.path.basename(self.mesh_path)}, _f)
-
-            self._status("Tunnel removed — closing and re-validating…", COLOR_PALE_GREEN)
-            print("[tunnel] Cut+Patch applied; mesh saved watertight (genus 0).",
-                  flush=True)
-
-            # Auto-close so the GUI can run the post-patch re-inspect + repair.
-            if callable(self.on_success):
-                try:
-                    self.on_success()
-                except Exception as e:
-                    print(f"[tunnel] on_success callback failed: {e}", file=sys.stderr)
         except Exception as e:
-            self._status(
-                f"Auto Cut+Patch failed: {e}\n"
-                "Use the exported loop for a manual Blender cut instead.",
-                "#e6a09f")
-            print(f"[tunnel] Cut+Patch failed: {e}", file=sys.stderr)
+            print(f"[tunnel] could not write cutpatch_report.json: {e}", file=sys.stderr)
+
+        self._status("Tunnel removed - closing and re-validating...", COLOR_PALE_GREEN)
+        print("[tunnel] Cut+Patch applied; mesh saved watertight; backup: "
+              f"{os.path.basename(backup_path_for(self.mesh_path))}", flush=True)
+        # Leave busy=True: the viewer is closing, nothing may re-cut.
+        if callable(self.on_success):
+            try:
+                self.on_success()
+            except Exception as e:
+                print(f"[tunnel] on_success callback failed: {e}", file=sys.stderr)
 
 
 def _mesh_to_arrays(pv_mesh):
@@ -626,7 +725,8 @@ def compute_tunnel_data(pts, faces, genus, *, max_pins=5, progress_cb=None):
     return {"mode": "none"}
 
 
-def render_tunnel_data(plotter, data, mesh_path=None, on_success=None):
+def render_tunnel_data(plotter, data, mesh_path=None, on_success=None,
+                       confirm_cb=None, busy_cb=None):
     """Main-thread: draw the computed tunnel data onto the plotter. Returns the
     same dict shape add_tunnel_overlay used (rendered, tight, export_txt,
     n_loops, focus, selector) or False if nothing to draw.
@@ -640,7 +740,8 @@ def render_tunnel_data(plotter, data, mesh_path=None, on_success=None):
     if mode == "pairs":
         pts, faces, pairs = data["pts"], data["faces"], data["pairs"]
         selector = TunnelSelector(plotter, pts, pairs, mesh_path=mesh_path,
-                                  faces=faces, on_success=on_success)
+                                  faces=faces, on_success=on_success,
+                                  confirm_cb=confirm_cb, busy_cb=busy_cb)
         return {"rendered": True, "tight": True,
                 "export_txt": selector.export_txt, "n_loops": len(pairs),
                 "focus": selector.focus_points(), "selector": selector}
@@ -791,24 +892,6 @@ def _add_static_overlays(pl, mesh, mesh_path):
     return legend_lines
 
 
-def _enable_loop_keys(pl, selector):
-    """Wire keyboard controls for loop selection and Cut+Patch.
-
-    Left-click is intentionally NOT wired for selection — it reverts to pure
-    camera rotation, eliminating the fight between drag-rotate and pick-select.
-
-    Keyboard layout (routed through the Qt eventFilter on the window):
-      Tab / Shift+Tab — cycle handles           (genus > 1 only)
-      Space           — toggle cut loop in the active pair
-      C               — Apply Cut+Patch
-
-    The Tab/Space keys are intercepted at the Qt level (see _ProblemViewerWindow
-    eventFilter) so they never reach pyvista's VTK key handler or Qt's focus
-    traversal. C stays here on the pyvista key event for compatibility.
-    """
-    pl.add_key_event('c', lambda: selector.apply_cut_and_patch())
-
-
 def view_mesh_problems(mesh_path):
     """
     Open a PySide6 window showing all detected mesh problems:
@@ -900,9 +983,12 @@ def _build_qt_classes():
 
             # Keyboard state — selector is None until _on_done fires.
             self._selector = None
-            # Intercept Tab/Space at the Qt level before VTK or focus-traversal
-            # can consume them.  installEventFilter on the interactor widget.
-            self.plotter.installEventFilter(self)
+            self._confirm_open = False
+            # Space/Tab/Shift+Tab/C/Esc are intercepted by an APPLICATION-level
+            # filter (scoped to this window being active) rather than a filter
+            # on the 3D widget: keys then work wherever focus is and are
+            # consumed before any focused widget or Qt focus-traversal sees them.
+            QtWidgets.QApplication.instance().installEventFilter(self)
 
             # Central progress overlay (child of plotter_container, positioned by resizeEvent)
             self._overlay = QtWidgets.QFrame(self.plotter_container)
@@ -921,6 +1007,29 @@ def _build_qt_classes():
             ov_lay.addWidget(ov_bar)
             self._overlay.hide()
 
+            # Confirm step for Cut+Patch (child of plotter_container, like the overlay)
+            self._confirm = QtWidgets.QFrame(self.plotter_container)
+            self._confirm.setStyleSheet(
+                "background: rgba(30,30,30,235); border-radius: 10px;")
+            cf_lay = QtWidgets.QVBoxLayout(self._confirm)
+            cf_lay.setContentsMargins(16, 14, 16, 14)
+            self._confirm_label = QtWidgets.QLabel("")
+            self._confirm_label.setWordWrap(True)
+            self._confirm_label.setStyleSheet(
+                "font-size: 13px; color: white; background: transparent;")
+            cf_lay.addWidget(self._confirm_label)
+            cf_row = QtWidgets.QHBoxLayout()
+            self._btn_confirm_yes = QtWidgets.QPushButton("Cut and patch")
+            self._btn_confirm_no = QtWidgets.QPushButton("Cancel")
+            for _b in (self._btn_confirm_yes, self._btn_confirm_no):
+                _b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+                cf_row.addWidget(_b)
+            cf_lay.addLayout(cf_row)
+            self._btn_confirm_yes.clicked.connect(self._confirm_yes)
+            self._btn_confirm_no.clicked.connect(self._confirm_no)
+            self._confirm_cb_pending = None
+            self._confirm.hide()
+
             # Right: control panel
             panel = QtWidgets.QFrame()
             panel.setObjectName("ControlPanel")
@@ -936,10 +1045,10 @@ def _build_qt_classes():
             panel_layout.addWidget(lbl_title)
 
             lbl_instr = QtWidgets.QLabel(
-                "Space — toggle selected loop in active pair\n"
-                "Tab / Shift+Tab — cycle to next loop pair (genus > 1)\n"
-                "C — Apply Cut+Patch\n"
-                "Click & Drag — Rotate camera")
+                "Space - toggle selected loop in active pair\n"
+                "Tab / Shift+Tab - cycle to next loop pair (genus > 1)\n"
+                "C - Apply Cut+Patch (asks to confirm first)\n"
+                "Click & Drag - Rotate camera")
             lbl_instr.setWordWrap(True)
             lbl_instr.setStyleSheet(f"color: #aaa; font-size: 11px; background: transparent;")
             panel_layout.addWidget(lbl_instr)
@@ -954,6 +1063,7 @@ def _build_qt_classes():
 
             self._btn_cut = QtWidgets.QPushButton("Apply Cut+Patch  [C]")
             self._btn_cut.setEnabled(False)
+            self._btn_cut.clicked.connect(self._request_cut)
             panel_layout.addWidget(self._btn_cut)
 
             self._btn_reset = QtWidgets.QPushButton("Reset Camera  [R]")
@@ -963,9 +1073,10 @@ def _build_qt_classes():
 
             self._btn_export = QtWidgets.QPushButton("Export Loops for Blender")
             self._btn_export.setEnabled(False)
+            self._btn_export.clicked.connect(self._do_export)
             panel_layout.addWidget(self._btn_export)
 
-            self._btn_close = QtWidgets.QPushButton("Save && Close")
+            self._btn_close = QtWidgets.QPushButton("Close without fixing")
             self._btn_close.setEnabled(False)
             self._btn_close.clicked.connect(self.close)
             panel_layout.addWidget(self._btn_close)
@@ -973,6 +1084,13 @@ def _build_qt_classes():
             # Status bar: slim label only (overlay is the prominent indicator)
             self.status_label = QtWidgets.QLabel("Loading mesh...")
             self.statusBar().addWidget(self.status_label, 1)
+
+            # Panel buttons must never take keyboard focus: a focused button
+            # turns Space (loop toggle) into a click on that button, and Apply
+            # has no other guard. Clicks still work; keys go to the filter.
+            for _b in (self._btn_cut, self._btn_reset, self._btn_export,
+                       self._btn_close):
+                _b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
 
             self.plotter.set_background(BG_COLOR)
 
@@ -1017,33 +1135,117 @@ def _build_qt_classes():
             self._overlay.raise_()
 
         def eventFilter(self, obj, event):
-            """Intercept Tab/Shift+Tab/Space key presses on the plotter widget
-            for keyboard loop navigation, before Qt focus-traversal or VTK can
-            consume them."""
-            if (self._selector is not None
-                    and event.type() == QtCore.QEvent.Type.KeyPress):
+            """Application-level key filter, active only while this window is the
+            active window: Space = toggle loop, Tab/Shift+Tab = cycle handles,
+            C = apply (opens the confirm step), Esc = cancel the confirm step.
+            Auto-repeat is swallowed so holding a key cannot fire twice, and
+            nothing but Esc does anything while a cut runs or the confirm shows."""
+            if (event.type() == QtCore.QEvent.Type.KeyPress
+                    and self._selector is not None
+                    and QtWidgets.QApplication.activeWindow() is self):
                 key = event.key()
                 Qt = QtCore.Qt
-                if key == Qt.Key.Key_Space:
-                    self._selector.toggle_active_loop()
-                    return True
-                if key == Qt.Key.Key_Tab:
-                    self._selector.next_handle()
-                    return True
-                # Shift+Tab arrives as Key_Backtab in Qt.
-                if key == Qt.Key.Key_Backtab:
-                    self._selector.prev_handle()
+                handled = (Qt.Key.Key_Space, Qt.Key.Key_Tab, Qt.Key.Key_Backtab,
+                           Qt.Key.Key_C, Qt.Key.Key_Escape)
+                if key in handled:
+                    if event.isAutoRepeat():
+                        return True
+                    sel = self._selector
+                    if self._confirm_open:
+                        if key == Qt.Key.Key_Escape:
+                            self._confirm_no()
+                        return True
+                    if sel.busy:
+                        return True
+                    if key == Qt.Key.Key_Space:
+                        sel.toggle_active_loop()
+                    elif key == Qt.Key.Key_Tab:
+                        sel.next_handle()
+                    elif key == Qt.Key.Key_Backtab:
+                        sel.prev_handle()
+                    elif key == Qt.Key.Key_C:
+                        self._request_cut()
+                    else:
+                        return False   # Esc with nothing to cancel
                     return True
             return super().eventFilter(obj, event)
 
+        # --- confirm step -------------------------------------------------
+        def _request_cut(self, *_):
+            if self._selector is None or self._selector.busy or self._confirm_open:
+                return
+            self._selector.request_apply()
+
+        def _show_confirm(self, n_defects, on_confirm):
+            from project_store import backup_path_for
+            backup_name = os.path.basename(backup_path_for(self.mesh_path))
+            if os.path.exists(backup_path_for(self.mesh_path)):
+                tail = (f"A backup from before your first tunnel fix "
+                        f"({backup_name}) already exists and is kept.")
+            else:
+                tail = (f"The current file is saved as {backup_name} first.")
+            self._confirm_label.setText(
+                f"Cut and patch {n_defects} defect(s)?\n"
+                f"{os.path.basename(self.mesh_path)} will be replaced. {tail}")
+            self._confirm_cb_pending = on_confirm
+            self._confirm_open = True
+            self._btn_cut.setEnabled(False)
+            self._place_overlays()
+            self._confirm.show()
+            self._confirm.raise_()
+
+        def _hide_confirm(self):
+            self._confirm_open = False
+            self._confirm_cb_pending = None
+            self._confirm.hide()
+            if self._selector is not None and not self._selector.busy:
+                self._btn_cut.setEnabled(True)
+
+        def _confirm_yes(self):
+            cb = self._confirm_cb_pending
+            self._hide_confirm()
+            if callable(cb):
+                cb()
+
+        def _confirm_no(self):
+            self._hide_confirm()
+            self._panel_status.setText("Cancelled - nothing was changed.")
+
+        def _set_cut_busy(self, busy):
+            self._btn_cut.setEnabled(not busy and not self._confirm_open)
+            self._btn_confirm_yes.setEnabled(not busy)
+
+        def _do_export(self):
+            path = self._selector.export() if self._selector is not None else None
+            if path:
+                self._panel_status.setText(f"Loops exported to:\n{path}")
+                self.status_label.setText(f"Exported loops: {path}")
+            else:
+                self._panel_status.setText("Loop export failed - see the console.")
+
+        def closeEvent(self, ev):
+            try:
+                QtWidgets.QApplication.instance().removeEventFilter(self)
+            except Exception:
+                pass
+            super().closeEvent(ev)
+
+        def _place_overlays(self):
+            r = self.plotter_container.rect()
+            w, h = 400, 80
+            self._overlay.setGeometry(
+                (r.width() - w) // 2, (r.height() - h) // 2, w, h)
+            cw, ch = min(520, max(300, r.width() - 40)), 150
+            self._confirm.setGeometry(
+                (r.width() - cw) // 2, (r.height() - ch) // 2, cw, ch)
+            self._overlay.raise_()
+            if self._confirm_open:
+                self._confirm.raise_()
+
         def resizeEvent(self, ev):
             super().resizeEvent(ev)
-            if hasattr(self, '_overlay'):
-                r = self.plotter_container.rect()
-                w, h = 400, 80
-                self._overlay.setGeometry(
-                    (r.width() - w) // 2, (r.height() - h) // 2, w, h)
-                self._overlay.raise_()
+            if hasattr(self, '_confirm'):
+                self._place_overlays()
 
         def _refresh_legend(self):
             self.plotter.add_text(_build_legend(self.legend_lines),
@@ -1061,26 +1263,29 @@ def _build_qt_classes():
             self._btn_close.setEnabled(True)
 
             found = render_tunnel_data(self.plotter, data, mesh_path=self.mesh_path,
-                                       on_success=self.close)
+                                       on_success=self.close,
+                                       confirm_cb=self._show_confirm,
+                                       busy_cb=self._set_cut_busy)
             self._selector = found.get("selector") if isinstance(found, dict) else None
             if found and self._selector is not None:
                 sel = self._selector
-                _enable_loop_keys(self.plotter, sel)
                 self._btn_cut.setEnabled(True)
-                self._btn_cut.clicked.connect(sel.apply_cut_and_patch)
                 self._btn_export.setEnabled(True)
-                self._btn_export.clicked.connect(sel.export)
+                self.plotter.setFocus()
                 msg = (f"{found['n_loops']} tunnel/handle(s) — dual pair shown. "
                        "RED = patch, BLUE = ignore. "
                        "Space=toggle, Tab=next handle, C=apply Cut+Patch.")
                 if found.get("export_txt"):
                     msg += f" Exported: {os.path.basename(found['export_txt'])}"
+                for note in sel.unavailable_messages():
+                    msg += " " + note
                 self.legend_lines.append(msg)
                 self.status_label.setText(
                     "Space=toggle cut loop  Tab=next handle  C=apply Cut+Patch")
                 self._panel_status.setText(
                     f"{found['n_loops']} tunnel(s) found.\n"
-                    "Space=toggle  Tab=next handle  C=apply")
+                    "Space=toggle  Tab=next handle  C=apply"
+                    + "".join("\n" + n for n in sel.unavailable_messages()))
             elif found:
                 self.legend_lines.append(
                     f"{found['n_loops']} tunnel loop(s) shown (magenta). "

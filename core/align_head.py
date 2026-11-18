@@ -366,9 +366,11 @@ class AlignHeadApp(QtWidgets.QMainWindow):
             # Invalidate any prior aligned-check so re-aligning forces re-inspection.
             # The check is keyed to the mesh directory, not the filename, so a
             # prior "ok" would otherwise survive an in-place overwrite of aligned_head.ply.
-            ProjectStore.for_mesh_dir(
-                os.path.dirname(self.output_mesh_path)
-            ).clear_check(MESH_ALIGNED)
+            _store = ProjectStore.for_mesh_dir(os.path.dirname(self.output_mesh_path))
+            _store.clear_check(MESH_ALIGNED)
+            # The pre-tunnel-fix backup belongs to the OLD alignment; drop it so
+            # "Restore" can never put an old-alignment mesh over the new one.
+            _store.clear_aligned_backup()
 
             # Save Info JSON — include raw picked points so they can be reloaded
             info_path = self._info_path()
