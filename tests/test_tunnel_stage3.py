@@ -59,16 +59,24 @@ def _inline_runner(sel):
     return runner
 
 
-def make_selector(tmp_path, torus, pair, runner=True, **kw):
+def make_selector(tmp_path, torus, pair, runner=True, long_guard=False, **kw):
+    """long_guard=False switches the stage-5d long-ring warning off: the synthetic
+    torus has rings longer than 25 % of its tiny bbox, which is not what the
+    other tests are about (tests/test_tunnel_longring.py covers the guard)."""
     pts, faces = torus
     mesh = str(tmp_path / "aligned_head.ply")
     _write_ply(mesh, pts, faces)
     holder = {}
     kw.setdefault("previews", True)
-    sel = mpv.TunnelSelector(
-        mock.MagicMock(), pts, [pair], mesh_path=mesh, faces=faces, genus=1,
-        preview_runner=(lambda fn: _inline_runner(holder["sel"])(fn)) if runner else None,
-        **kw)
+    guard = (mock.patch.object(mpv, "long_ring_flags",
+                               lambda _p, loops, _d, *a, **k: [False] * len(loops))
+             if not long_guard else mock.patch.object(mpv, "PREVIEWS_ENABLED",
+                                                      mpv.PREVIEWS_ENABLED))
+    with guard:
+        sel = mpv.TunnelSelector(
+            mock.MagicMock(), pts, [pair], mesh_path=mesh, faces=faces, genus=1,
+            preview_runner=(lambda fn: _inline_runner(holder["sel"])(fn)) if runner else None,
+            **kw)
     holder["sel"] = sel
     return sel, mesh
 
@@ -439,8 +447,10 @@ def test_previews_disabled_flag_gives_stage2_behaviour_plus_after_view(
     mesh = str(tmp_path / "aligned_head.ply")
     _write_ply(mesh, pts, faces)
     started = []
-    sel = mpv.TunnelSelector(mock.MagicMock(), pts, [pair], mesh_path=mesh, faces=faces,
-                             preview_runner=lambda fn: started.append(fn))
+    with mock.patch.object(mpv, "long_ring_flags",
+                           lambda _p, loops, _d, *a, **k: [False] * len(loops)):
+        sel = mpv.TunnelSelector(mock.MagicMock(), pts, [pair], mesh_path=mesh,
+                                 faces=faces, preview_runner=lambda fn: started.append(fn))
     assert sel.previews is None
     sel.start_previews()
     assert started == []

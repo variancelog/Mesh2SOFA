@@ -572,7 +572,22 @@ def remaining_defects_note(shown, genus):
             "after these are fixed.")
 
 
-def option_cards(labels, blocked_reasons, sel, previews=None):
+# Head-wrapping loop guard (stage 5d): a candidate ring longer than this fraction of
+# the mesh bounding-box diagonal is suspicious (it probably wraps the head). The
+# loop finding is unchanged; the card warns and the defect is excluded from
+# "Apply recommended fix".
+LONG_RING_FRAC = 0.25
+LONG_RING_WARNING = "This ring is unusually long - check it before applying"
+
+
+def long_ring_flags(pts, loops, diag, frac=LONG_RING_FRAC):
+    """One bool per loop: True if its length exceeds `frac` x the bbox diagonal."""
+    if not diag or diag <= 0:
+        return [False] * len(loops)
+    return [loop_length_mm(pts, lp) > frac * diag for lp in loops]
+
+
+def option_cards(labels, blocked_reasons, sel, previews=None, long_flags=None):
     """Two card descriptions for one defect.
 
     labels: classifier labels of the AVAILABLE loops (1 or 2 entries);
@@ -583,7 +598,9 @@ def option_cards(labels, blocked_reasons, sel, previews=None):
     previews (stage 3): per available loop a (state, reason) pair from the
     preview cache, or None when previews are off. Each card then carries a
     "status" line; a failed preview greys the card out and it can't be chosen
-    (its technical reason goes in the tooltip)."""
+    (its technical reason goes in the tooltip).
+    long_flags (stage 5d): per available loop, True if the ring is unusually long;
+    the card then carries "warning" and shows it in its status line."""
     cards = []
     for i in range(2):
         if i < len(labels):
@@ -601,6 +618,12 @@ def option_cards(labels, blocked_reasons, sel, previews=None):
                     card["selected"] = False
                     card["tooltip"] = (tip + "\n\nPreview check failed: "
                                        + str(reason))
+            if long_flags is not None and i < len(long_flags) and long_flags[i]:
+                card["warning"] = LONG_RING_WARNING
+                card["status"] = (LONG_RING_WARNING if not card["status"]
+                                  else card["status"] + "\n" + LONG_RING_WARNING)
+                if card.get("preview_state") != "failed":
+                    card["preview_state"] = "warn"
             cards.append(card)
         else:
             tip = (blocked_reasons[i - len(labels)]
@@ -656,6 +679,10 @@ def recommended_selection(handles, usable=None):
     for hi, h in enumerate(handles):
         k = hi + 1
         labels = h["labels"]
+        if any(h.get("long") or ()):
+            return None, (f"Defect {k}: a ring is unusually long (it may wrap "
+                          "around the head), so there is no recommendation - "
+                          "check it and choose for yourself.")
         if _is_classified(h):
             li = labels.index("TUNNEL")
             if usable is not None and not usable(hi, li):
@@ -1239,6 +1266,7 @@ class TunnelSelector:
             linking = [lk.get("cut")] + ([lk.get("avoid")] if len(loops) > 1 else [])
             self.handles.append({"loops": loops, "labels": labels, "sel": 0,
                                  "blocked": blocked, "linking": linking,
+                                 "long": long_ring_flags(self.pts, loops, self.diag),
                                  "chosen": False})   # True once the user picked an option
         if previews is None:
             previews = PREVIEWS_ENABLED and preview_runner is not None
@@ -1287,7 +1315,7 @@ class TunnelSelector:
         pv_states = (None if self.previews is None else
                      [self.preview_state(hi, li) for li in range(len(h["loops"]))])
         return option_cards(h["labels"], [r for (_lp, r) in h["blocked"]], h["sel"],
-                            pv_states)
+                            pv_states, h.get("long"))
 
     def can_apply(self):
         """Every defect still has a usable (not failed-preview) selected option."""
@@ -2531,7 +2559,7 @@ def _build_qt_classes():
             self._state.setVisible(bool(status))
             self._state.setStyleSheet(
                 "font-size: 11px; background: transparent; color: "
-                + {"ready": "#7fd6a0", "failed": "#e6a09f"}.get(preview_state, "#9aa")
+                + {"ready": "#7fd6a0", "failed": "#e6a09f", "warn": "#e6c36f"}.get(preview_state, "#9aa")
                 + ";")
             self.setToolTip(tooltip or "")
             self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor if enabled

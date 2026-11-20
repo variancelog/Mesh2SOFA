@@ -109,6 +109,9 @@ def describe(check):
     comps = _n(c, "components")
     if comps > 1:
         out.append(f"The mesh is in {comps} separate pieces.")
+        if _n(c, "large_pieces") > 1:
+            out.append("Repair won't delete a large piece automatically; remove the "
+                       "unwanted piece in Blender and import again.")
     si = _n(c, "si_faces")
     if si > 0:
         out.append(_plural(si, "1 face crosses through another face.",

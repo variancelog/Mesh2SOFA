@@ -107,6 +107,71 @@ def _get_si_filter_name(ms):
     return None
 
 
+def _topo_get(topo, names, default=0):
+    """First present key of `names` in a PyMeshLab topological-measures dict.
+    Key names differ between PyMeshLab builds (e.g. connected_components_number
+    vs number_of_connected_components, number_holes vs number_of_holes)."""
+    for n in names:
+        if n in topo and topo[n] is not None:
+            return topo[n]
+    return default
+
+
+def component_face_counts(faces):
+    """Face count of every connected piece (list, any order); [] for no faces.
+    Same vertex-graph connectivity as count_components."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    fm = np.asarray(faces, dtype=np.int64)
+    if fm.size == 0:
+        return []
+    used, inv = np.unique(fm.ravel(), return_inverse=True)
+    f = inv.reshape(fm.shape)
+    n = len(used)
+    rows = np.concatenate([f[:, 0], f[:, 1], f[:, 2]])
+    cols = np.concatenate([f[:, 1], f[:, 2], f[:, 0]])
+    g = coo_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n, n))
+    _n, labels = connected_components(g, directed=False)
+    return np.bincount(labels[f[:, 0]], minlength=_n).tolist()
+
+
+# A piece with more than this share of all faces is "substantial": repair must not
+# silently delete it (pymeshfix drops every piece but the largest).
+LARGE_PIECE_FRAC = 0.01
+LARGE_PIECES_MESSAGE = ("The mesh is in {n} large separate pieces; repair won't delete "
+                        "one automatically. Remove the unwanted piece in Blender and "
+                        "import again.")
+
+
+def large_piece_count(face_counts, frac=LARGE_PIECE_FRAC):
+    """Number of pieces holding more than `frac` of all faces."""
+    total = sum(face_counts)
+    return sum(1 for c in face_counts if total and c > frac * total)
+
+
+def count_components(faces):
+    """Number of connected pieces of a triangle mesh, from the face array alone.
+
+    Vectorised scipy connected-components over the vertex graph of the REFERENCED
+    vertices (unreferenced vertices are not pieces). Independent of PyMeshLab so a
+    failing/renamed measure can never silently report 0 for a multi-piece mesh.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    fm = np.asarray(faces, dtype=np.int64)
+    if fm.size == 0:
+        return 0
+    used, inv = np.unique(fm.ravel(), return_inverse=True)
+    f = inv.reshape(fm.shape)
+    n = len(used)
+    rows = np.concatenate([f[:, 0], f[:, 1], f[:, 2]])
+    cols = np.concatenate([f[:, 1], f[:, 2], f[:, 0]])
+    g = coo_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n, n))
+    return int(connected_components(g, directed=False)[0])
+
+
 def inspect_mesh(path, *, max_freq_hz=None):
     """
     Inspect a mesh for issues that would cause NumCalc (BEM) to crash.
@@ -128,6 +193,7 @@ def inspect_mesh(path, *, max_freq_hz=None):
         "genus": 0,
         "volume": None,
         "tiny_faces": 0,
+        "large_pieces": 0,
     }
 
     # --- tiny_faces note ---
@@ -137,14 +203,17 @@ def inspect_mesh(path, *, max_freq_hz=None):
 
     # Track outside the try block so genus classification can use it
     is_two_manifold = True
+    measure_errors = []
 
     # --- Topological measures ---
     try:
         topo = ms.get_topological_measures()
-        counts["holes"] = int(topo.get("number_of_holes", 0))
+        counts["holes"] = int(_topo_get(topo, ("number_of_holes", "number_holes")))
         counts["boundary_edges"] = int(topo.get("boundary_edges", 0))
-        counts["components"] = int(topo.get("number_of_connected_components", 0))
-        counts["unreferenced_verts"] = int(topo.get("number_unreferenced_vertices", 0))
+        counts["components"] = int(_topo_get(topo, (
+            "number_of_connected_components", "connected_components_number")))
+        counts["unreferenced_verts"] = int(_topo_get(topo, (
+            "number_unreferenced_vertices", "unreferenced_vertices")))
         is_two_manifold = bool(topo.get("is_mesh_two_manifold", True))
 
         # Genus — try from get_ dict first, fall back to compute_ (older PyMeshLab name)
@@ -164,7 +233,17 @@ def inspect_mesh(path, *, max_freq_hz=None):
         counts["non_manifold_edges"] = int(topo.get("non_two_manifold_edges", 0))
         counts["non_manifold_verts"] = int(topo.get("non_two_manifold_vertices", 0))
     except Exception as e:
-        pass
+        measure_errors.append(f"topological measures: {e}")
+
+    # --- Connected pieces (critical if > 1) ---
+    # Computed from the face array, so it holds even when PyMeshLab's topological
+    # measures raised or use different key names. Never lowers a PyMeshLab count.
+    try:
+        fcounts = component_face_counts(ms.current_mesh().face_matrix())
+        counts["components"] = max(counts["components"], len(fcounts))
+        counts["large_pieces"] = large_piece_count(fcounts)
+    except Exception as e:
+        measure_errors.append(f"component count: {e}")
 
     # --- Geometric measures (volume sign → normal orientation) ---
     try:
@@ -295,6 +374,10 @@ def inspect_mesh(path, *, max_freq_hz=None):
             ),
             "count": counts["tiny_faces"],
         })
+    if measure_errors:
+        # A failed measure leaves its count at 0; say so instead of looking clean.
+        minor.append({"issue": "Some checks could not run: " + "; ".join(measure_errors),
+                      "count": len(measure_errors)})
     if wavelength_warning:
         minor.append({"issue": f"Mesh density low: {wavelength_warning}", "count": 0})
 
@@ -310,6 +393,7 @@ def inspect_mesh(path, *, max_freq_hz=None):
         "critical": critical,
         "minor": minor,
         "counts": counts,
+        "measure_errors": measure_errors,
         "summary": format_report({"severity": severity, "critical": critical, "minor": minor}),
     }
     return report
@@ -400,6 +484,12 @@ def repair_mesh(in_path, out_path):
     """
     before = inspect_mesh(in_path)
 
+    # Never silently discard a substantial piece: pymeshfix keeps only the largest.
+    if before["counts"].get("large_pieces", 0) > 1:
+        msg = LARGE_PIECES_MESSAGE.format(n=before["counts"]["large_pieces"])
+        return {"before": before, "after": before, "success": False,
+                "engine": "none", "message": msg}
+
     engine = "pymeshfix"
     try:
         _repair_pymeshfix(in_path, out_path)
@@ -410,7 +500,11 @@ def repair_mesh(in_path, out_path):
     after = inspect_mesh(out_path)
     non_tunnel_criticals = [c for c in after.get("critical", []) if not _is_tunnel_issue(c["issue"])]
     success = len(non_tunnel_criticals) == 0
-    return {"before": before, "after": after, "success": success, "engine": engine}
+    res = {"before": before, "after": after, "success": success, "engine": engine}
+    dropped = before["counts"].get("components", 0) - after["counts"].get("components", 0)
+    if dropped > 0:
+        res["dropped_pieces"] = dropped
+    return res
 
 
 _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
@@ -515,6 +609,8 @@ def import_mesh(dest_path, blender_exe):
         if os.path.exists(repaired_path):
             os.remove(repaired_path)
         log("   [!] Some issues remain after repair (may include tunnels — warn-only).")
+        if result.get("message"):
+            log("   [!] " + result["message"])
 
     # Re-inspect the final cleaned file.
     log("--> Re-inspecting cleaned mesh...")
@@ -661,6 +757,11 @@ def repair_aligned(mesh_dir):
         def compute():
             res = repair_mesh(orig, scratch)
             log(format_report(res["after"]))
+            if res.get("message"):
+                log("   [!] " + res["message"])
+            if res.get("dropped_pieces"):
+                log(f"   Dropped {res['dropped_pieces']} small separate piece(s) "
+                    "(each under 1% of the faces).")
             if not res["success"]:
                 raise _RepairFailed()
             return res

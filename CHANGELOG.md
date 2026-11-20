@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Separate pieces are now detected, and a very long ring is flagged (stage 5d): `inspect_mesh` counted 0 components on a mesh in several pieces (this PyMeshLab names the key differently) and reported it fine; the count now also comes from the faces (scipy), so such a mesh is critical ("N separate pieces") on import and in Step 2, and a failed measure is reported instead of silently counting 0. Tunnel fixer: a ring longer than 25 % of the mesh's bounding-box diagonal shows "This ring is unusually long - check it before applying" on its card and that defect is left out of "Apply recommended fix". Repair never silently deletes a substantial piece: if two or more pieces each hold more than 1 % of the faces, repair refuses, leaves the file untouched, and Step 2 ends at the "stuck" dialog saying to remove the unwanted piece in Blender and import again; smaller debris (1 % or less) is still dropped and the log says how many pieces.
+
 - Restore button only while it can do something (stage 5c): "Restore mesh from before Step 2 fixes" now moves the validated backup over `aligned_head.ply` (atomic), so the button hides after use and returns when the next repair or tunnel fix makes a new backup. A rejected backup leaves both files untouched.
 
 - Tunnel fixer, clearer one-click button: it now reads "Apply all recommended fixes [R]" when the panel shows several defects (and "Apply recommended fix [R]" for one), so the important part is on the button and not only in the small caption; when the button is disabled, the reason is shown in the same warning colour as the "look closely" note.
