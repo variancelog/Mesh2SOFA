@@ -495,7 +495,8 @@ def viewer_setup(tmp_path, torus):
 
 def _files(tmp_path):
     return {n for n in os.listdir(tmp_path)
-            if not n.startswith("aligned_head_cut")}
+            if not n.startswith("aligned_head_cut")
+            and n != "cutpatch_history.json"}     # the history is append-only (4a)
 
 
 def test_viewer_apply_shows_result_but_writes_nothing(viewer_setup):
@@ -520,6 +521,7 @@ def test_viewer_undo_leaves_file_byte_identical(viewer_setup):
     assert open(mesh, "rb").read() == before
     assert _files(tmp_path) == {"aligned_head.ply"}
     assert events["success"] == 0
+    assert (tmp_path / "cutpatch_history.json").exists(), "the undo is recorded"
     sel.request_apply()                          # and it can be applied again
     assert sel.mode == "after"
 

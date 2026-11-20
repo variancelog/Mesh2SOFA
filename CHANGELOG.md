@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Tunnel fixer, record every choice: each Keep and each Undo of a tunnel fix is appended to `cutpatch_history.json` next to `aligned_head.ply` (time, mesh, genus and face counts, and per defect which option was chosen, loop lengths, linking numbers and whether it was the pre-selected one). It survives re-align and re-import, and a failure to write it never blocks saving.
+
 - Tunnel fixer safety pass: C / Apply in the tunnel viewer now asks for confirmation first, keeps a one-time backup (`aligned_head.pre_cutpatch.ply`, made before the first fix since the last alignment) and saves atomically, so a failed cut can never damage `aligned_head.ply`. New "Restore mesh from before hole fix" button in the main window; re-aligning removes the backup.
 - Cut & patch is stricter: exactly 2 holes per loop, union checks for multi-loop cuts, post-patch checks (watertight, 1 component, genus, face count), and the second loop of a pair is verified when the viewer opens (an unusable one is greyed out instead of failing after you press C).
 - Viewer: panel buttons no longer take keyboard focus (Space/Tab/C always work), "Save & Close" renamed "Close without fixing", Export shows the path it wrote, Apply is blocked while a cut is running.

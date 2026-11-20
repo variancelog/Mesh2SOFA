@@ -113,6 +113,51 @@ def apply_with_backup(mesh_path, compute, write):
         raise
 
 
+HISTORY_NAME = "cutpatch_history.json"
+
+
+def append_cutpatch_history(mesh_dir, event):
+    """Append one event to <mesh_dir>/cutpatch_history.json ({"version": 1,
+    "events": [...]}), via a temp file + os.replace. An unreadable / malformed
+    file is renamed aside (cutpatch_history.corrupt-<timestamp>.json) and a fresh
+    one started. Never raises (the record must not endanger a mesh save);
+    returns True if the event was written. Deliberately NOT a mesh-prep
+    artifact: the history outlives re-align and re-import."""
+    import time
+    path = os.path.join(mesh_dir, HISTORY_NAME)
+    tmp = path + ".tmp"
+    try:
+        events = []
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                events = data["events"]
+                if not isinstance(events, list):
+                    raise ValueError("events is not a list")
+            except Exception:
+                aside = os.path.join(
+                    mesh_dir, "cutpatch_history.corrupt-%s.json"
+                    % time.strftime("%Y%m%d-%H%M%S"))
+                n = 1
+                while os.path.exists(aside):
+                    n += 1
+                    aside = os.path.join(
+                        mesh_dir, "cutpatch_history.corrupt-%s-%d.json"
+                        % (time.strftime("%Y%m%d-%H%M%S"), n))
+                os.replace(path, aside)
+                events = []
+        events.append(event)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "events": events}, f, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        print(f"[history] could not record the choice: {e}")
+        _remove_quiet(tmp)
+        return False
+
+
 _PLY_TYPE_SIZE = {"char": 1, "int8": 1, "uchar": 1, "uint8": 1, "short": 2,
                   "int16": 2, "ushort": 2, "uint16": 2, "int": 4, "int32": 4,
                   "uint": 4, "uint32": 4, "float": 4, "float32": 4,

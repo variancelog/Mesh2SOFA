@@ -1106,6 +1106,7 @@ class TunnelSelector:
         self.job_runner = job_runner
         self.preview_runner = preview_runner
         self.busy = False           # True while a cut or a save is running
+        self.via = "manual"         # how the pending fix was chosen (4b sets "recommended")
         self.mode = "choose"        # "choose" | "after"
         self.view = "before"        # what the main view shows: "before" | "after"
         self.result = None          # (pts, faces) of the unkept fix, mode "after"
@@ -1137,8 +1138,10 @@ class TunnelSelector:
             if pr.get("B_unavailable") is not None:
                 blocked.append((np.asarray(pr["B_unavailable"]),
                                 pr.get("B_reason") or "does not cut cleanly"))
+            lk = pr.get("linking") or {}
+            linking = [lk.get("cut")] + ([lk.get("avoid")] if len(loops) > 1 else [])
             self.handles.append({"loops": loops, "labels": labels, "sel": 0,
-                                 "blocked": blocked})
+                                 "blocked": blocked, "linking": linking})
         if previews is None:
             previews = PREVIEWS_ENABLED and preview_runner is not None
         self.previews = None
@@ -1842,11 +1845,65 @@ class TunnelSelector:
         if self.previews.pending_keys():
             self.start_previews()
 
+    def history_event(self, kind):
+        """The record of the current choice (kind "kept" | "undone"): one entry
+        per defect with the chosen / other option label, loop lengths (mm),
+        linking numbers and whether the choice is the pre-selected default
+        (index 0 = select_cut_loop's TUNNEL pick). Pure data, JSON-safe."""
+        import datetime
+
+        def _lk(v):
+            return None if v is None else [float(v[0]), float(v[1])]
+
+        def _len(lp):
+            cl = np.vstack([self.pts[lp], self.pts[lp][:1]])
+            return round(float(np.linalg.norm(np.diff(cl, axis=0), axis=1).sum()), 3)
+
+        defects = []
+        for h in self.handles:
+            s = h["sel"]
+            o = 1 - s if len(h["loops"]) > 1 else None
+            defects.append({
+                "chosen": h["labels"][s],
+                "other": None if o is None else h["labels"][o],
+                "chosen_length_mm": _len(h["loops"][s]),
+                "other_length_mm": None if o is None else _len(h["loops"][o]),
+                "chosen_linking": _lk(h["linking"][s] if s < len(h["linking"]) else None),
+                "other_linking": (None if o is None or o >= len(h["linking"])
+                                  else _lk(h["linking"][o])),
+                "was_default": s == 0,
+            })
+        ev = {
+            "event": kind,
+            "time": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "mesh": os.path.basename(self.mesh_path or ""),
+            "via": self.via,
+            "genus_before": None if self.genus is None else int(self.genus),
+            "face_count_before": None if self.faces is None else int(len(self.faces)),
+            "defects": defects,
+        }
+        if kind == "kept" and self.result is not None:
+            ev["genus_after"] = (None if self.result_genus is None
+                                 else int(self.result_genus))
+            ev["face_count_after"] = int(len(self.result[1]))
+        return ev
+
+    def _record_history(self, kind):
+        """Best-effort: a history failure logs one line and never blocks."""
+        try:
+            from project_store import append_cutpatch_history
+            append_cutpatch_history(os.path.dirname(os.path.abspath(self.mesh_path)),
+                                    self.history_event(kind))
+        except Exception as e:
+            print(f"[tunnel] history not recorded: {e}", file=sys.stderr)
+
     def undo(self):
         """Discard the unkept result and go back to choosing (Undo / Esc in the
         after-view). Nothing was written, so there is nothing to restore."""
         if self.busy or self.mode != "after":
             return
+        self._record_history("undone")
+        self.via = "manual"
         self.result = None
         self.result_mask = None
         self.result_genus = None
@@ -1899,6 +1956,7 @@ class TunnelSelector:
 
         # The mesh is now replaced; the rest is best-effort notification.
         self.kept = True
+        self._record_history("kept")
         from project_store import backup_path_for
         try:
             # Sentinel so the GUI knows the fix ran (not just that the viewer

@@ -268,9 +268,10 @@ def test_preview_cache_stores_the_mask(torus_pair):
     assert len(mask) == len(cache.result((0, 0))[1])
 
 
-def test_after_view_colours_the_new_surface_and_shows_the_legend(torus_pair):
+def test_after_view_colours_the_new_surface_and_shows_the_legend(torus_pair, tmp_path):
     sel, pl = _selector(torus_pair, previews=True)
-    sel.mesh_path = "dummy.ply"                          # enable Apply (nothing is written)
+    # enable Apply; Undo appends to cutpatch_history.json beside the mesh, so keep it in tmp
+    sel.mesh_path = str(tmp_path / "dummy.ply")
     sel.request_apply()                                  # inline job runner
     assert sel.mode == "after" and sel.result_mask is not None
     assert sel.new_surface_legend() == mpv.GREEN_LEGEND
