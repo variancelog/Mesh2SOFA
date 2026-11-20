@@ -195,3 +195,11 @@ def test_selector_advanced_rows(tmp_path, torus, pair):  # noqa: F811
     sel, _ = make_selector(tmp_path, torus, pair, runner=False, previews=False)
     rows = sel.advanced_rows()
     assert len(rows) >= 2 and all("mm" in r for r in rows)
+
+
+# --- recommended_label (stage 5a) --------------------------------------------
+def test_recommended_label_says_all_only_for_several_defects():
+    assert mpv.recommended_label(1) == "Apply recommended fix  [R]"
+    assert mpv.recommended_label(2) == "Apply all recommended fixes  [R]"
+    assert mpv.recommended_label(5) == mpv.RECOMMEND_LABEL_ALL
+    assert mpv.recommended_label(0) == mpv.RECOMMEND_LABEL

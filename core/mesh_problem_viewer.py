@@ -422,6 +422,7 @@ TIGHT_MODE_NOTE = ("These loops can't be cut inside the app: the safe automatic 
                    "mesh will not be changed. Use 'Export Loops for Blender' "
                    "(under Advanced, opened for you) and make the cut there.")
 RECOMMEND_LABEL = "Apply recommended fix  [R]"
+RECOMMEND_LABEL_ALL = "Apply all recommended fixes  [R]"
 RECOMMEND_CAPTION = ("Fills the hole for every defect. You'll see the result "
                      "before anything is saved.")
 RECOMMEND_CAPTION_MIXED = ("Fills the hole where that is clear; for the other defects it "
@@ -621,6 +622,12 @@ def _is_classified(h):
     labels = h["labels"]
     return (len(labels) == 2 and all(lb in OPTION_TITLE for lb in labels)
             and "TUNNEL" in labels)
+
+
+def recommended_label(n_defects):
+    """Text of the recommended-fix button: says "all" when the panel shows more
+    than one defect (the caption underneath is easy to overlook)."""
+    return RECOMMEND_LABEL_ALL if n_defects > 1 else RECOMMEND_LABEL
 
 
 def recommended_caption(handles):
@@ -3074,6 +3081,7 @@ def _build_qt_classes():
             self._adv_box.setVisible(not after)
             rec, rec_reason = sel.recommendation()
             self._btn_recommend.setEnabled(not locked and not after and rec is not None)
+            self._btn_recommend.setText(recommended_label(n))
             self._lbl_recommend.setText(recommended_caption(sel.handles) if rec is not None
                                         else rec_reason)
             self._lbl_recommend.setStyleSheet(
