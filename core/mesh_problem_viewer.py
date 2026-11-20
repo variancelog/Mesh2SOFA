@@ -420,7 +420,14 @@ SINGLE_UNKNOWN_WARNING = ("Only one way to fix this defect is available, and we 
 TIGHT_MODE_NOTE = ("These loops can't be cut inside the app: the safe automatic "
                    "check did not pass for them, so Apply is disabled and your "
                    "mesh will not be changed. Use 'Export Loops for Blender' "
-                   "and make the cut there.")
+                   "(under Advanced, opened for you) and make the cut there.")
+RECOMMEND_LABEL = "Apply recommended fix  [R]"
+RECOMMEND_CAPTION = ("Fills the hole for every defect. You'll see the result "
+                     "before anything is saved.")
+RECOMMEND_TOOLTIP = ("Chooses 'Fill the hole' for every defect, computes the fix "
+                     "and shows you the result. Nothing is saved until you press "
+                     "Keep.")
+ADVANCED_LABEL = "Advanced"
 NO_LOOPS_NOTE = ("A safe way to fix this automatically could not be found. "
                  "Your mesh has not been changed. Close this window and fix the "
                  "hole in Blender or another mesh tool, then re-align.")
@@ -599,6 +606,70 @@ def option_cards(labels, blocked_reasons, sel, previews=None):
                           "enabled": False, "tooltip": tip, "selected": False,
                           "status": None})
     return cards
+
+
+def loop_length_mm(pts, lp):
+    """Length (mm) of the closed loop of vertex indices `lp`."""
+    cl = np.vstack([pts[lp], pts[lp][:1]])
+    return round(float(np.linalg.norm(np.diff(cl, axis=0), axis=1).sum()), 3)
+
+
+def recommended_selection(handles, usable=None):
+    """The "Apply recommended fix" choice. Returns (selection, reason): one option
+    index per defect, or (None, one-line reason) when there is no safe recommendation.
+
+    Classified defects (TUNNEL + HANDLE) take their TUNNEL loop ("Fill the hole").
+    A defect that is NOT classified (UNKNOWN / single option) has no recommendation:
+    it keeps the option the user explicitly chose (handle["chosen"], set by a
+    click or Space) and is refused until they have. An unavailable TUNNEL option
+    refuses the whole recommendation: there is deliberately no fallback to the
+    HANDLE option (that would be the software deciding). usable(hi, li) -> bool
+    says whether an option passed its safety check (default: all usable)."""
+    if not handles:
+        return None, "There is nothing to fix."
+    selection = []
+    for hi, h in enumerate(handles):
+        k = hi + 1
+        labels = h["labels"]
+        classified = (len(labels) == 2 and all(lb in OPTION_TITLE for lb in labels)
+                      and "TUNNEL" in labels)
+        if classified:
+            li = labels.index("TUNNEL")
+            if usable is not None and not usable(hi, li):
+                return None, (f"Defect {k}: 'Fill the hole' isn't available (it failed "
+                              "a safety check), so there is no recommendation - "
+                              "choose for yourself.")
+        else:
+            if not h.get("chosen"):
+                return None, (f"Defect {k}: couldn't tell which is the hole - choose "
+                              "an option for it first.")
+            li = h["sel"]
+            if usable is not None and not usable(hi, li):
+                return None, (f"Defect {k}: the option you chose isn't available (it "
+                              "failed a safety check).")
+        selection.append(li)
+    return selection, ""
+
+
+def advanced_rows(handles, pts):
+    """Technical display rows for the Advanced section: one line per option of
+    every defect (classifier label, loop length in mm, linking numbers), plus the
+    options that are not offered. Pure; the main panel stays in plain words."""
+    rows = []
+    for hi, h in enumerate(handles):
+        lks = h.get("linking") or []
+        for li, lp in enumerate(h["loops"]):
+            lk = lks[li] if li < len(lks) else None
+            lk_txt = ("n/a" if lk is None
+                      else f"{float(lk[0]):.2f} in / {float(lk[1]):.2f} out")
+            mark = "  <- selected" if li == h.get("sel") else ""
+            rows.append(f"Defect {hi + 1}, option {li + 1}: {h['labels'][li]}, "
+                        f"loop {loop_length_mm(pts, lp):.1f} mm, "
+                        f"linking {lk_txt}{mark}")
+        for bi, (lp, reason) in enumerate(h["blocked"]):
+            rows.append(f"Defect {hi + 1}, option {len(h['loops']) + bi + 1}: not "
+                        f"available ({reason}), loop {loop_length_mm(pts, lp):.1f} mm")
+    return rows
 
 
 def defect_notes(labels, shown, genus):
@@ -1106,7 +1177,7 @@ class TunnelSelector:
         self.job_runner = job_runner
         self.preview_runner = preview_runner
         self.busy = False           # True while a cut or a save is running
-        self.via = "manual"         # how the pending fix was chosen (4b sets "recommended")
+        self.via = "manual"         # how the pending fix was chosen: "manual" | "recommended"
         self.mode = "choose"        # "choose" | "after"
         self.view = "before"        # what the main view shows: "before" | "after"
         self.result = None          # (pts, faces) of the unkept fix, mode "after"
@@ -1141,7 +1212,8 @@ class TunnelSelector:
             lk = pr.get("linking") or {}
             linking = [lk.get("cut")] + ([lk.get("avoid")] if len(loops) > 1 else [])
             self.handles.append({"loops": loops, "labels": labels, "sel": 0,
-                                 "blocked": blocked, "linking": linking})
+                                 "blocked": blocked, "linking": linking,
+                                 "chosen": False})   # True once the user picked an option
         if previews is None:
             previews = PREVIEWS_ENABLED and preview_runner is not None
         self.previews = None
@@ -1258,17 +1330,29 @@ class TunnelSelector:
         h = self.handles[self.active]
         if self.mode != "choose" or self.busy:
             return
-        if self.option_usable(self.active, li) and h["sel"] != li:
+        if not self.option_usable(self.active, li):
+            return
+        newly_chosen = not h.get("chosen")
+        h["chosen"] = True
+        if h["sel"] != li:
             h["sel"] = li
+            self.via = "manual"
             self.redraw()
             self.export()
             self._changed()
+        elif newly_chosen:
+            self._changed()      # the recommended-fix button may now be enabled
 
     def toggle_active_loop(self):
         """Switch to the other option of the active defect (Space key)."""
         h = self.handles[self.active]
         if len(h["loops"]) > 1:
             self.select_option((h["sel"] + 1) % len(h["loops"]))   # no-op if unusable
+        else:
+            self.select_option(h["sel"])    # only one option: Space confirms it
+
+    def advanced_rows(self):
+        return advanced_rows(self.handles, self.pts)
 
     def focus_points(self):
         return [list(map(float, self.pts[h["loops"][h["sel"]]].mean(0)))
@@ -1748,6 +1832,38 @@ class TunnelSelector:
             return
         self.apply_cut_and_patch()
 
+    def recommendation(self):
+        """(selection, reason) of recommended_selection for the current state."""
+        return recommended_selection(self.handles, self.option_usable)
+
+    def can_apply_recommended(self):
+        return (self.mode == "choose" and not self.busy
+                and self.recommendation()[0] is not None)
+
+    def apply_recommended(self):
+        """R key / "Apply recommended fix": select 'Fill the hole' for every
+        classified defect (explicitly chosen options for the others), then run the
+        normal Apply (same worker, checks and after-view; nothing is saved until
+        Keep). Refused with the reason when there is no safe recommendation."""
+        if self.busy or self.mode != "choose":
+            return
+        selection, reason = self.recommendation()
+        if selection is None:
+            self._status(reason, COLOR_CUT_INACTIVE)
+            return
+        if self.faces is None or not self.mesh_path:
+            self._status("The fix is unavailable (no mesh data).", COLOR_CUT_INACTIVE)
+            return
+        for h, li in zip(self.handles, selection):
+            h["sel"] = li
+        self.via = "recommended"
+        self.redraw()
+        self.export()
+        self._changed()
+        self.request_apply()
+        if self.mode == "choose" and not self.busy:
+            self.via = "manual"        # refused before it started
+
     def apply_cut_and_patch(self):
         """Compute the fix for the chosen option(s) and enter the after-view.
 
@@ -1816,6 +1932,7 @@ class TunnelSelector:
         """GUI-thread tail of apply_cut_and_patch (error is None on success)."""
         if error is not None:
             self._set_busy(False)
+            self.via = "manual"       # a failed recommended fix must not label the next one
             self._status(
                 f"The fix was NOT applied; your mesh is unchanged.\n{error}\n"
                 "Use 'Export Loops for Blender' to make this cut manually instead.",
@@ -1856,8 +1973,7 @@ class TunnelSelector:
             return None if v is None else [float(v[0]), float(v[1])]
 
         def _len(lp):
-            cl = np.vstack([self.pts[lp], self.pts[lp][:1]])
-            return round(float(np.linalg.norm(np.diff(cl, axis=0), axis=1).sum()), 3)
+            return loop_length_mm(self.pts, lp)
 
         defects = []
         for h in self.handles:
@@ -2553,7 +2669,17 @@ def _build_qt_classes():
             panel_layout = QtWidgets.QVBoxLayout(panel)
             panel_layout.setContentsMargins(12, 14, 12, 14)
             panel_layout.setSpacing(8)
-            main_layout.addWidget(panel, stretch=1)
+            # The panel scrolls when the window is too short for all of it (the
+            # option cards must never be squeezed into overlapping text).
+            panel_scroll = QtWidgets.QScrollArea()
+            panel_scroll.setWidgetResizable(True)
+            panel_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            panel_scroll.setHorizontalScrollBarPolicy(
+                QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            panel_scroll.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            panel_scroll.setFixedWidth(340 + panel_scroll.verticalScrollBar().sizeHint().width() + 2)
+            panel_scroll.setWidget(panel)
+            main_layout.addWidget(panel_scroll, stretch=1)
 
             lbl_title = QtWidgets.QLabel(os.path.basename(mesh_path))
             lbl_title.setStyleSheet("font-size: 12px; color: #999;")
@@ -2578,6 +2704,20 @@ def _build_qt_classes():
             self._lbl_rule.setStyleSheet(
                 "color: #aaa; font-size: 11px; background: transparent;")
             dl.addWidget(self._lbl_rule)
+
+            self._btn_recommend = QtWidgets.QPushButton(RECOMMEND_LABEL)
+            self._btn_recommend.setToolTip(RECOMMEND_TOOLTIP)
+            self._btn_recommend.setStyleSheet(
+                "QPushButton { background-color: #1f8f5c; font-weight: bold; "
+                "padding: 8px; } QPushButton:disabled { background-color: #444; "
+                "color: #888; }")
+            self._btn_recommend.clicked.connect(self._request_recommended)
+            dl.addWidget(self._btn_recommend)
+            self._lbl_recommend = QtWidgets.QLabel(RECOMMEND_CAPTION)
+            self._lbl_recommend.setWordWrap(True)
+            self._lbl_recommend.setStyleSheet(
+                "color: #aaa; font-size: 11px; background: transparent;")
+            dl.addWidget(self._lbl_recommend)
 
             nav = QtWidgets.QHBoxLayout()
             self._btn_prev = QtWidgets.QPushButton("< Prev")
@@ -2684,10 +2824,37 @@ def _build_qt_classes():
             self._btn_see.clicked.connect(self._toggle_see_through)
             panel_layout.addWidget(self._btn_see)
 
+            # Collapsible "Advanced": technical labels, loop lengths, linking
+            # numbers and the Blender export (collapsed by default, not persisted;
+            # opened automatically in the "tight" fallback mode).
+            self._adv_open = False
+            self._adv_box = QtWidgets.QWidget()
+            self._adv_box.setStyleSheet("background: transparent;")
+            av = QtWidgets.QVBoxLayout(self._adv_box)
+            av.setContentsMargins(0, 0, 0, 0)
+            av.setSpacing(6)
+            self._btn_adv = QtWidgets.QPushButton()
+            self._btn_adv.setToolTip("Technical details and the Blender export.")
+            self._btn_adv.clicked.connect(self._toggle_advanced)
+            av.addWidget(self._btn_adv)
+            self._adv_content = QtWidgets.QWidget()
+            ac = QtWidgets.QVBoxLayout(self._adv_content)
+            ac.setContentsMargins(0, 0, 0, 0)
+            ac.setSpacing(6)
+            self._lbl_adv = QtWidgets.QLabel("")
+            self._lbl_adv.setWordWrap(True)
+            self._lbl_adv.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            self._lbl_adv.setStyleSheet(
+                "color: #bbb; font-size: 11px; background: transparent;")
+            ac.addWidget(self._lbl_adv)
             self._btn_export = QtWidgets.QPushButton("Export Loops for Blender")
             self._btn_export.setEnabled(False)
             self._btn_export.clicked.connect(self._do_export)
-            panel_layout.addWidget(self._btn_export)
+            ac.addWidget(self._btn_export)
+            av.addWidget(self._adv_content)
+            panel_layout.addWidget(self._adv_box)
+            self._sync_advanced()
 
             self._btn_close = QtWidgets.QPushButton("Close without fixing")
             self._btn_close.setEnabled(False)
@@ -2702,7 +2869,7 @@ def _build_qt_classes():
             # turns Space (option toggle) into a click on that button, and Apply
             # has no other guard. Clicks still work; keys go to the filter.
             for _b in (self._btn_cut, self._btn_zoom, self._btn_whole, self._btn_see,
-                       self._btn_export, self._btn_close, self._btn_prev,
+                       self._btn_recommend, self._btn_adv, self._btn_export, self._btn_close, self._btn_prev,
                        self._btn_next, self._btn_view, self._btn_keep,
                        self._btn_undo, *self._cards):
                 _b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
@@ -2794,8 +2961,9 @@ def _build_qt_classes():
                 Qt = QtCore.Qt
                 camera_keys = (Qt.Key.Key_Z, Qt.Key.Key_H, Qt.Key.Key_X, Qt.Key.Key_P)
                 handled = (Qt.Key.Key_Space, Qt.Key.Key_Tab, Qt.Key.Key_Backtab,
-                           Qt.Key.Key_C, Qt.Key.Key_Escape) + camera_keys
-                if key in camera_keys and event.modifiers() != Qt.KeyboardModifier.NoModifier:
+                           Qt.Key.Key_C, Qt.Key.Key_Escape, Qt.Key.Key_R) + camera_keys
+                plain_keys = camera_keys + (Qt.Key.Key_R,)
+                if key in plain_keys and event.modifiers() != Qt.KeyboardModifier.NoModifier:
                     return super().eventFilter(obj, event)
                 sel = self._selector
                 if key in handled and (sel is not None or key == Qt.Key.Key_P):
@@ -2829,6 +2997,8 @@ def _build_qt_classes():
                         sel.prev_handle()
                     elif key == Qt.Key.Key_C:
                         self._request_cut()
+                    elif key == Qt.Key.Key_R:
+                        self._request_recommended()
                     elif key == Qt.Key.Key_P:
                         self._toggle_view()
                     elif key == Qt.Key.Key_Z:
@@ -2882,7 +3052,16 @@ def _build_qt_classes():
             self._decision.setVisible(not after)
             self._after.setVisible(after)
             self._btn_cut.setVisible(not after)
-            self._btn_export.setVisible(not after)
+            self._adv_box.setVisible(not after)
+            rec, rec_reason = sel.recommendation()
+            self._btn_recommend.setEnabled(not locked and not after and rec is not None)
+            self._lbl_recommend.setText(RECOMMEND_CAPTION if rec is not None
+                                        else rec_reason)
+            self._lbl_recommend.setStyleSheet(
+                "color: %s; font-size: 11px; background: transparent;"
+                % ("#aaa" if rec is not None else "#e6c36f"))
+            self._lbl_adv.setText("\n".join(sel.advanced_rows()))
+            self._lbl_adv.setVisible(True)
             self._lbl_defect.setText(sel.defect_title())
             for i, spec in enumerate(sel.cards()):
                 self._cards[i].set_state(
@@ -2934,6 +3113,19 @@ def _build_qt_classes():
                 f"color: {color}; font-size: 11px; background: transparent;")
 
         # --- apply / keep / undo ------------------------------------------
+        def _request_recommended(self, *_):
+            if self._selector is None or self._selector.busy or self._prompt_open:
+                return
+            self._selector.apply_recommended()
+
+        def _toggle_advanced(self, *_):
+            self._adv_open = not self._adv_open
+            self._sync_advanced()
+
+        def _sync_advanced(self):
+            self._adv_content.setVisible(self._adv_open)
+            self._btn_adv.setText(ADVANCED_LABEL + ("  v" if self._adv_open else "  >"))
+
         def _request_cut(self, *_):
             if self._selector is None or self._selector.busy or self._prompt_open:
                 return
@@ -3135,6 +3327,9 @@ def _build_qt_classes():
                     msg += f"\n\nAlready written: {self._tight_export}"
                 self._panel_status.setText(msg)
                 self._btn_export.setEnabled(bool(self._tight_export))
+                self._lbl_adv.setVisible(False)
+                self._adv_open = True      # the Blender export is the way forward
+                self._sync_advanced()
                 self.status_label.setText("Cutting is disabled for these loops.")
                 focus_pts = found.get("focus")
                 if focus_pts:

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Tunnel fixer, one-click default: new "Apply recommended fix" button (key R) fills the hole for every defect, then shows the usual before / after with Keep and Undo (nothing is saved before Keep). Defects where it couldn't tell hole from bridge need your own pick first, and an unavailable "Fill the hole" option disables the button instead of falling back to the other one. Technical labels, loop lengths, linking numbers and "Export Loops for Blender" moved into a collapsible Advanced section (opens by itself when cutting is disabled); history events now record `"via": "recommended"`.
+
 - Tunnel fixer, record every choice: each Keep and each Undo of a tunnel fix is appended to `cutpatch_history.json` next to `aligned_head.ply` (time, mesh, genus and face counts, and per defect which option was chosen, loop lengths, linking numbers and whether it was the pre-selected one). It survives re-align and re-import, and a failure to write it never blocks saving.
 
 - Tunnel fixer safety pass: C / Apply in the tunnel viewer now asks for confirmation first, keeps a one-time backup (`aligned_head.pre_cutpatch.ply`, made before the first fix since the last alignment) and saves atomically, so a failed cut can never damage `aligned_head.ply`. New "Restore mesh from before hole fix" button in the main window; re-aligning removes the backup.
