@@ -6,7 +6,7 @@ import subprocess
 
 import numpy as np
 
-from project_store import ProjectStore, MESH_ALIGNED, MESH_GRADED
+from project_store import ProjectStore, MESH_ALIGNED, MESH_GRADED, apply_with_backup
 
 # =============================================================================
 # INSPECTION & REPAIR OVERVIEW
@@ -619,13 +619,29 @@ def inspect_aligned(mesh_dir):
     sys.exit(0 if report["severity"] != "critical" else 1)
 
 
+def _non_tunnel_criticals(report):
+    return [c for c in report.get("critical", []) if not _is_tunnel_issue(c["issue"])]
+
+
+class _RepairFailed(Exception):
+    """pymeshfix / the fallback left non-tunnel criticals: do not touch the file."""
+
+
 def repair_aligned(mesh_dir):
     """
     Repair aligned_head.ply in place (pymeshfix primary), then rewrite
     aligned_check.json from a fresh inspection. Geometry criticals (self-
     intersections, non-manifold, boundaries) are fixed; topological tunnels
     remain critical and are handled by the cut+patch / tunnel-loop step.
-    Exits non-zero if any critical (incl. tunnels) remains.
+
+    * The mesh is only rewritten when it has non-tunnel criticals (a tunnel-only
+      or clean mesh is left byte-identical: nothing to repair).
+    * The rewrite goes through project_store.apply_with_backup, so the single
+      backup (aligned_head.pre_cutpatch.ply, made if absent) also covers this
+      automatic repair; a failed repair leaves the mesh untouched and removes a
+      backup this call created.
+    * Exit code 0 = no non-tunnel critical remains (clean, or only tunnels left,
+      which is a successful repair); 1 = real failure / non-tunnel criticals remain.
     """
     def log(msg):
         print(msg, flush=True)
@@ -635,25 +651,43 @@ def repair_aligned(mesh_dir):
         log("[!] aligned_head.ply not found.")
         sys.exit(1)
 
-    repaired = orig + "_repaired.ply"
-    log("--> Repairing aligned_head.ply...")
-    result = repair_mesh(orig, repaired)
-    log(format_report(result["after"]))
-
-    if result["success"]:
-        os.replace(repaired, orig)
-        log(f"   Repair succeeded (engine={result['engine']}) — file updated.")
+    before = inspect_mesh(orig)
+    if not _non_tunnel_criticals(before):
+        log("--> Nothing to repair (no geometry problems); mesh left unchanged.")
     else:
-        if os.path.exists(repaired):
-            os.remove(repaired)
-        log("   Critical (non-tunnel) issues remain after repair.")
+        scratch = orig + "_repaired.ply"
+        log("--> Repairing aligned_head.ply...")
+
+        def compute():
+            res = repair_mesh(orig, scratch)
+            log(format_report(res["after"]))
+            if not res["success"]:
+                raise _RepairFailed()
+            return res
+
+        def write(res, tmp):
+            os.replace(scratch, tmp)
+
+        try:
+            res = apply_with_backup(orig, compute, write)
+            log(f"   Repair succeeded (engine={res['engine']}) - file updated.")
+        except _RepairFailed:
+            log("   Critical (non-tunnel) issues remain after repair; mesh left unchanged.")
+        except Exception as e:
+            log(f"   Repair failed ({e}); mesh left unchanged.")
+        finally:
+            if os.path.exists(scratch):
+                os.remove(scratch)
 
     # Re-inspect the (possibly updated) file for the authoritative severity.
     report = inspect_mesh(orig)
     _write_aligned_check(mesh_dir, report)
-    if report["severity"] == "critical":
-        log("[MESH_CHECK] Critical issues remain (tunnels require the cut+patch step).")
+    if _non_tunnel_criticals(report):
+        log("[MESH_CHECK] Critical issues remain after repair.")
         sys.exit(1)
+    if report["severity"] == "critical":
+        log("[MESH_CHECK] Geometry is clean; only see-through holes remain "
+            "(fix them with the tunnel fixer).")
     else:
         log("[MESH_CHECK] Aligned mesh is clean. You may proceed to grading.")
 

@@ -69,6 +69,25 @@ def test_chosen_unknown_option_that_failed_is_refused():
     assert sel is None and "Defect 1" in reason
 
 
+def test_single_option_because_loop_b_failed_gets_its_own_reason():
+    h = _h(["UNKNOWN"], blocked=[(np.array([0, 1, 2]), "does not cut")])
+    sel, reason = mpv.recommended_selection([_h(["TUNNEL", "HANDLE"]), h])
+    assert sel is None
+    assert reason == ("Defect 2: only one way to fix it was found - check it and "
+                      "choose it first.")
+    h["chosen"] = True                  # the user's explicit choice is fine
+    assert mpv.recommended_selection([_h(["TUNNEL", "HANDLE"]), h])[0] == [0, 0]
+
+
+def test_caption_does_not_claim_fill_the_hole_when_user_choices_are_used():
+    ok = [_h(["TUNNEL", "HANDLE"])]
+    assert mpv.recommended_caption(ok) == mpv.RECOMMEND_CAPTION
+    mixed = ok + [_h(["UNKNOWN"], chosen=True, blocked=[(np.array([0, 1, 2]), "x")])]
+    cap = mpv.recommended_caption(mixed)
+    assert cap == mpv.RECOMMEND_CAPTION_MIXED and "every defect" not in cap
+    assert "the option you chose" in cap
+
+
 def test_no_defects():
     assert mpv.recommended_selection([])[0] is None
 

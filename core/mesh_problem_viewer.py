@@ -424,6 +424,9 @@ TIGHT_MODE_NOTE = ("These loops can't be cut inside the app: the safe automatic 
 RECOMMEND_LABEL = "Apply recommended fix  [R]"
 RECOMMEND_CAPTION = ("Fills the hole for every defect. You'll see the result "
                      "before anything is saved.")
+RECOMMEND_CAPTION_MIXED = ("Fills the hole where that is clear; for the other defects it "
+                           "uses the option you chose. You'll see the result before "
+                           "anything is saved.")
 RECOMMEND_TOOLTIP = ("Chooses 'Fill the hole' for every defect, computes the fix "
                      "and shows you the result. Nothing is saved until you press "
                      "Keep.")
@@ -614,6 +617,21 @@ def loop_length_mm(pts, lp):
     return round(float(np.linalg.norm(np.diff(cl, axis=0), axis=1).sum()), 3)
 
 
+def _is_classified(h):
+    labels = h["labels"]
+    return (len(labels) == 2 and all(lb in OPTION_TITLE for lb in labels)
+            and "TUNNEL" in labels)
+
+
+def recommended_caption(handles):
+    """Caption under "Apply recommended fix": only claims "fills the hole" for
+    every defect when every defect is classified; otherwise says the user's own
+    choice is used for the others."""
+    if all(_is_classified(h) for h in handles):
+        return RECOMMEND_CAPTION
+    return RECOMMEND_CAPTION_MIXED
+
+
 def recommended_selection(handles, usable=None):
     """The "Apply recommended fix" choice. Returns (selection, reason): one option
     index per defect, or (None, one-line reason) when there is no safe recommendation.
@@ -631,9 +649,7 @@ def recommended_selection(handles, usable=None):
     for hi, h in enumerate(handles):
         k = hi + 1
         labels = h["labels"]
-        classified = (len(labels) == 2 and all(lb in OPTION_TITLE for lb in labels)
-                      and "TUNNEL" in labels)
-        if classified:
+        if _is_classified(h):
             li = labels.index("TUNNEL")
             if usable is not None and not usable(hi, li):
                 return None, (f"Defect {k}: 'Fill the hole' isn't available (it failed "
@@ -641,6 +657,9 @@ def recommended_selection(handles, usable=None):
                               "choose for yourself.")
         else:
             if not h.get("chosen"):
+                if len(labels) == 1 and h.get("blocked"):
+                    return None, (f"Defect {k}: only one way to fix it was found - "
+                                  "check it and choose it first.")
                 return None, (f"Defect {k}: couldn't tell which is the hole - choose "
                               "an option for it first.")
             li = h["sel"]
@@ -2076,7 +2095,7 @@ class TunnelSelector:
         from project_store import backup_path_for
         try:
             # Sentinel so the GUI knows the fix ran (not just that the viewer
-            # was closed); picked up by _after_tunnel_viewer(), which runs
+            # was closed); picked up by the GUI's one-click Step 2 (inspect_flow), which runs
             # repair_aligned automatically.
             import json as _json
             sentinel = os.path.join(os.path.dirname(self.mesh_path),
@@ -3055,7 +3074,7 @@ def _build_qt_classes():
             self._adv_box.setVisible(not after)
             rec, rec_reason = sel.recommendation()
             self._btn_recommend.setEnabled(not locked and not after and rec is not None)
-            self._lbl_recommend.setText(RECOMMEND_CAPTION if rec is not None
+            self._lbl_recommend.setText(recommended_caption(sel.handles) if rec is not None
                                         else rec_reason)
             self._lbl_recommend.setStyleSheet(
                 "color: %s; font-size: 11px; background: transparent;"

@@ -8,6 +8,7 @@ import sys
 import threading
 import queue
 import ctypes
+import types
 
 # Worker/library modules live in core/. Put it on sys.path so the flat imports
 # below (and any core module imported directly) resolve when the GUI runs from root.
@@ -17,6 +18,7 @@ if CORE_DIR not in sys.path:
 
 from project_store import (ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED,
                            RESOLUTION_MODES, resolution_mode)
+from inspect_flow import InspectFlow
 
 # Hide the console window so running as .py looks like .pyw (no terminal).
 # A real (hidden) console still exists, so child processes (e.g. NumCalc.exe)
@@ -369,52 +371,66 @@ class MeshQualityDialog(ctk.CTkToplevel):
     def on_cancel(self):    self.destroy()
 
 
-class AlignedMeshDialog(ctk.CTkToplevel):
-    """Dialog for the standalone 'Inspect & Fix Mesh' step (operates on the
-    aligned mesh). Repair is suppressed when the only criticals are topological
-    tunnels (genus>0), which geometric repair cannot fix — those go to the
-    interactive see-through-hole fixer (pick "Fill the hole" or "Remove the
-    bridge" for each defect, then Apply)."""
-    def __init__(self, parent, mesh_dir, summary, tunnel_only, callback):
+class InspectStuckDialog(ctk.CTkToplevel):
+    """Shown by the one-click Step 2 when the automatic repair could not fix the
+    mesh. Plain sentences only; "Try repair again" re-runs the repair, "Close"
+    leaves the mesh as it is. (The tunnel fixer is never offered here: it needs a
+    watertight, manifold mesh.)"""
+    def __init__(self, parent, sentences, on_retry):
         super().__init__(parent)
-        self.callback = callback
-        self.mesh_dir = mesh_dir
-        self.title("Mesh Quality Issues — Inspect & Fix")
-        self.geometry("560x300")
+        self.on_retry = on_retry
+        self.title("Inspect & Fix - the mesh needs more work")
+        self.geometry("520x280")
         self.resizable(False, False)
         self.lift()
         self.attributes("-topmost", True)
         self.focus()
         self.grab_set()
 
-        if tunnel_only:
-            hint = ("See-through hole(s) detected (topological tunnels). Geometric repair\n"
-                    "cannot fix these. Open the fixer, choose 'Fill the hole' or 'Remove the\n"
-                    "bridge' for each defect, and click Apply.")
-        else:
-            hint = ("Critical mesh issues found. Attempt Repair (pymeshfix) to clean\n"
-                    "self-intersections / non-manifold / boundaries, then re-inspect.")
-        ctk.CTkLabel(self, text=hint, font=("Roboto", 13), justify="left").pack(pady=(16, 6), padx=20)
-
-        box = ctk.CTkTextbox(self, height=110, width=520)
+        ctk.CTkLabel(self, text="The automatic repair couldn't fix these problems:",
+                     font=("Roboto", 13), justify="left").pack(pady=(16, 6), padx=20, anchor="w")
+        box = ctk.CTkTextbox(self, height=120, width=480)
         box.pack(pady=6, padx=20, fill="both", expand=False)
-        box.insert("end", summary)
+        box.insert("end", "\n".join("- " + s for s in sentences))
         box.configure(state="disabled")
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(pady=10, fill="x")
+        ctk.CTkButton(btn_frame, text="Close", fg_color="transparent", border_width=1,
+                      text_color=("gray10", "#DCE4EE"), command=self.destroy).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Try repair again", fg_color="#2CC985",
+                      hover_color="#209F69", command=self.on_try_again).pack(side="right", padx=10)
 
-        ctk.CTkButton(btn_frame, text="Cancel", fg_color="transparent", border_width=1,
-                      text_color=("gray10", "#DCE4EE"), command=self.on_cancel).pack(side="right", padx=10)
-        ctk.CTkButton(btn_frame, text="Fix See-through Holes (Viewer)", fg_color="#C0392B",
-                      hover_color="#A93226", command=self.on_visualize).pack(side="right", padx=10)
-        if not tunnel_only:
-            ctk.CTkButton(btn_frame, text="Attempt Repair", fg_color="#2CC985",
-                          hover_color="#209F69", command=self.on_repair).pack(side="right", padx=10)
+    def on_try_again(self):
+        self.destroy()
+        self.on_retry()
 
-    def on_repair(self):    self.callback("repair", self.mesh_dir);    self.destroy()
-    def on_visualize(self): self.callback("visualize", self.mesh_dir); self.destroy()
-    def on_cancel(self):    self.destroy()
+
+class NextDefectDialog(ctk.CTkToplevel):
+    """After a kept hole fix when more see-through holes remain (rest clean)."""
+    def __init__(self, parent, sentences, on_fix_next):
+        super().__init__(parent)
+        self.on_fix_next = on_fix_next
+        self.title("Hole fixed - more to do")
+        self.geometry("480x220")
+        self.resizable(False, False)
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus()
+        self.grab_set()
+        ctk.CTkLabel(self, text="The fix was saved. " + " ".join(sentences),
+                     font=("Roboto", 13), justify="left", wraplength=430
+                     ).pack(pady=(24, 10), padx=20, anchor="w")
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=10, fill="x", side="bottom")
+        ctk.CTkButton(btn_frame, text="Later", fg_color="transparent", border_width=1,
+                      text_color=("gray10", "#DCE4EE"), command=self.destroy).pack(side="right", padx=10)
+        ctk.CTkButton(btn_frame, text="Fix the next defect", fg_color="#C0392B",
+                      hover_color="#A93226", command=self.on_next).pack(side="right", padx=10)
+
+    def on_next(self):
+        self.destroy()
+        self.on_fix_next()
 
 
 class HRTFProjectManager(ctk.CTk):
@@ -552,8 +568,8 @@ class HRTFProjectManager(ctk.CTk):
         # frame, next to the steps; shown only while the backup made by the
         # first in-app tunnel fix exists (see update_workflow_state).
         self.btn_restore_tunnel = ctk.CTkButton(
-            self.frame_actions, text="Restore mesh from before hole fix",
-            width=240, height=26, fg_color="transparent", border_width=1,
+            self.frame_actions, text="Restore mesh from before Step 2 fixes",
+            width=250, height=26, fg_color="transparent", border_width=1,
             text_color=("gray10", "#DCE4EE"), command=self.restore_pre_tunnel_mesh)
         self.btn_restore_tunnel.grid(row=0, column=1, padx=10, pady=5, sticky="e")
         self.btn_restore_tunnel.grid_remove()
@@ -618,13 +634,16 @@ class HRTFProjectManager(ctk.CTk):
 
     # --- PROCESS & LOGGING ENGINE ---
     
-    def run_external_command(self, cmd_list, cwd=None, shell=False):
-        """Standard runner for single process"""
+    def run_external_command(self, cmd_list, cwd=None, shell=False, on_done=None):
+        """Standard runner for single process. on_done(rc), if given, is called on
+        the GUI thread after the process ended and the log has drained."""
         if self.is_running: return self.log("[!] Process running...")
+        self._on_done = on_done
         
         def target():
             self.is_running = True
             self.btn_stop.configure(state="normal")
+            rc = None
             try:
                 # stdin=DEVNULL: a worker that prompts with input() must fail
                 # fast instead of waiting forever on the GUI's hidden console.
@@ -644,6 +663,7 @@ class HRTFProjectManager(ctk.CTk):
             finally:
                 self.current_process = None
                 self.is_running = False
+                self._last_rc = rc
                 self.log_queue.put("DONE")
         
         t = threading.Thread(target=target, daemon=True)
@@ -705,15 +725,14 @@ class HRTFProjectManager(ctk.CTk):
                     if getattr(self, '_pending_mesh_check', False):
                         self._pending_mesh_check = False
                         self.after(200, self._check_mesh_quality_result)
-                    if getattr(self, '_pending_inspect_check', False):
-                        self._pending_inspect_check = False
-                        self.after(200, self._check_aligned_quality_result)
                     if getattr(self, '_pending_import_check', False):
                         self._pending_import_check = False
                         self.after(200, self._check_import_result)
-                    if getattr(self, '_pending_cutpatch_revalidate', False):
-                        self._pending_cutpatch_revalidate = False
-                        self.after(200, self._after_cutpatch_revalidated)
+                    cb = getattr(self, '_on_done', None)
+                    if cb is not None:
+                        self._on_done = None
+                        rc = getattr(self, '_last_rc', None)
+                        self.after(200, lambda cb=cb, rc=rc: cb(rc))
                 else:
                     self.log(msg, timestamp=False)
         except queue.Empty:
@@ -1191,116 +1210,59 @@ class HRTFProjectManager(ctk.CTk):
         Absent => not yet inspected => the Inspect & Fix step is not complete."""
         return self._store(mesh_path).read_check(MESH_ALIGNED) == CleanState.CLEAN
 
-    @staticmethod
-    def _counts_tunnel_only(counts):
-        """True if genus>0 is the only thing making the mesh critical."""
-        genus = counts.get("genus", 0) or 0
-        vol = counts.get("volume")
-        other_critical = (
-            (counts.get("holes", 0) or 0) > 0
-            or (counts.get("boundary_edges", 0) or 0) > 0
-            or (counts.get("non_manifold_edges", 0) or 0) > 0
-            or (counts.get("non_manifold_verts", 0) or 0) > 0
-            or (counts.get("si_faces", 0) or 0) > 0
-            or (counts.get("components", 0) or 0) > 1
-            or (vol is not None and vol < 0)
-        )
-        return genus > 0 and not other_critical
+    # --- ONE-CLICK STEP 2 (decision logic lives in core/inspect_flow.py) ---
 
-    def _check_aligned_quality_result(self):
-        """Called after an inspect_aligned / repair_aligned run, or when the
-        detached tunnel viewer closes — shows AlignedMeshDialog if the aligned
-        mesh still has critical issues, or restyles the Inspect button to 'done'
-        if the check now passes."""
-        mesh_dir = self.get_mesh_dir()
-        store = self._store(mesh_dir)
-        state = store.read_check(MESH_ALIGNED)
-        if state == CleanState.NOT_RUN:
-            return
-        # Always refresh workflow buttons so the Inspect step's styling reflects
-        # the current check result (covers the viewer-close "ok" path too).
-        self.update_workflow_state()
-        if state != CleanState.CRITICAL:
-            self.log("[OK] Aligned mesh passed inspection — you may proceed to grading.")
-            return
-        info = store.read_check_data(MESH_ALIGNED).get("aligned", {})
-        counts = info.get("counts", {})
-        tunnel_only = self._counts_tunnel_only(counts)
-        summary = "\n".join(f"  {k}: {v}" for k, v in counts.items() if v not in (0, None))
-        AlignedMeshDialog(self, mesh_dir, summary, tunnel_only, self._on_aligned_quality_action)
-
-    def _on_aligned_quality_action(self, action, mesh_dir):
-        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    def _inspect_flow_io(self, mesh_dir):
+        """Callbacks InspectFlow needs, bound to the GUI."""
         inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
-
-        if action == "repair":
-            self.log("--> Attempting mesh repair on aligned mesh (pymeshfix)...")
-            self._pending_inspect_check = True
-            cmd = [sys.executable, "-u", inspector, "repair_aligned", mesh_dir]
-            self.run_external_command(cmd)
-
-        elif action == "visualize":
-            viewer = os.path.join(CORE_DIR, "mesh_problem_viewer.py")
-            ply = os.path.join(mesh_dir, "aligned_head.ply")
-            if os.path.exists(ply):
-                self.log("--> Opening the see-through-hole fixer. For each defect choose "
-                         "'Fill the hole' or 'Remove the bridge' (click a card, or "
-                         "Space / Tab), then click Apply (or press C). The window will "
-                         "close and the mesh is re-checked automatically.")
-                proc = subprocess.Popen([sys.executable, viewer, ply],
-                                        creationflags=CREATE_NO_WINDOW)
-                self._watch_viewer(proc, lambda: self._after_tunnel_viewer(mesh_dir))
-
-    def _after_tunnel_viewer(self, mesh_dir):
-        """Called when the tunnel viewer process exits. If the viewer applied a
-        Cut+Patch it writes cutpatch_report.json; if that file is present we run
-        repair_aligned to re-inspect and auto-repair the newly-saved mesh, then
-        show a good/bad popup. If the file is absent the user closed the viewer
-        without cutting, so we fall through to the normal quality-result check."""
+        viewer = os.path.join(CORE_DIR, "mesh_problem_viewer.py")
+        ply = os.path.join(mesh_dir, "aligned_head.ply")
         sentinel = os.path.join(mesh_dir, "cutpatch_report.json")
-        if not os.path.exists(sentinel):
-            # User closed without cutting — existing check flow.
-            self._check_aligned_quality_result()
-            return
-        try:
-            os.remove(sentinel)
-        except Exception:
-            pass
-        self.log("--> Hole fix applied. Re-inspecting and auto-repairing aligned mesh…")
-        scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
-        self._pending_cutpatch_revalidate = True
-        self._cutpatch_mesh_dir = mesh_dir
-        cmd = [sys.executable, "-u", inspector, "repair_aligned", mesh_dir]
-        self.run_external_command(cmd)
 
-    def _after_cutpatch_revalidated(self):
-        """Called after the post-cut&patchrepair_aligned finishes. Reads
-        aligned_check.json and shows a good/bad popup, then updates the workflow."""
-        mesh_dir = getattr(self, "_cutpatch_mesh_dir", None)
-        self.update_workflow_state()
-        if not mesh_dir:
-            return
-        state = self._store(mesh_dir).read_check(MESH_ALIGNED)
-        if state == CleanState.CRITICAL:
-            info = self._store(mesh_dir).read_check_data(MESH_ALIGNED).get("aligned", {})
-            counts = info.get("counts", {})
-            issues_txt = "\n".join(
-                f"  {k}: {v}" for k, v in counts.items()
-                if v not in (0, None, False)
-            )
-            messagebox.showwarning(
-                "Re-validation — Issues Remain",
-                "The mesh was saved after the hole fix but still has critical issues:\n\n"
-                f"{issues_txt}\n\n"
-                "Run 'Inspect & Fix Mesh' again to view and address them.",
-            )
-        else:
-            messagebox.showinfo(
-                "All Clear",
-                "See-through hole fixed and mesh re-checked — no critical issues remain.\n\n"
-                "You may proceed to Step 3 (Process & Grade).",
-            )
+        def run(kind, then):
+            sub = "inspect_aligned" if kind == "inspect" else "repair_aligned"
+            self.run_external_command([sys.executable, "-u", inspector, sub, mesh_dir],
+                                      on_done=then)
+
+        def read_check():
+            data = self._store(mesh_dir).read_check_data(MESH_ALIGNED)
+            return data
+
+        def open_viewer(then):
+            if not os.path.exists(ply):
+                return self.log("Error: aligned_head.ply not found.")
+            try:
+                os.remove(sentinel)       # a stale sentinel must not count as a kept fix
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+            self.log("--> In the fixer, choose 'Fill the hole' or 'Remove the bridge' for "
+                     "each defect (click a card, or Space / Tab), then Apply (C) and "
+                     "Keep. The window closes and the mesh is re-checked automatically.")
+            proc = subprocess.Popen([sys.executable, viewer, ply],
+                                    creationflags=CREATE_NO_WINDOW)
+
+            def closed():
+                kept = os.path.exists(sentinel)
+                if kept:
+                    try:
+                        os.remove(sentinel)
+                    except Exception:
+                        pass
+                then(kept)
+            self._watch_viewer(proc, closed)
+
+        return types.SimpleNamespace(
+            run=run, read_check=read_check,
+            clear_check=lambda: self._store(mesh_dir).clear_check(MESH_ALIGNED),
+            log=self.log, open_viewer=open_viewer,
+            show_stuck=lambda sentences, retry: InspectStuckDialog(self, sentences, retry),
+            info=lambda title, text: messagebox.showinfo(title, text),
+            offer_next=lambda sentences, fix_next: NextDefectDialog(self, sentences, fix_next),
+            warn=lambda title, text: messagebox.showwarning(title, text),
+            refresh=self.update_workflow_state,
+        )
 
     def _check_import_result(self):
         """Called after an import_mesh run — reads import_report.json and shows
@@ -1492,9 +1454,8 @@ class HRTFProjectManager(ctk.CTk):
         self.run_external_command(cmd)
 
     def run_inspect_fix(self):
-        """Step 2: inspect the aligned mesh; on criticals show the Inspect & Fix
-        dialog (pymeshfix repair + interactive tunnel Cut+Patch)."""
-        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        """Step 2, one click: inspect -> (auto-repair once) -> tunnel fixer or
+        done. The decisions live in core/inspect_flow.py."""
         inspector = os.path.join(CORE_DIR, "mesh_inspector.py")
         mesh_dir = self.get_mesh_dir()
         aligned = os.path.join(mesh_dir, "aligned_head.ply")
@@ -1503,10 +1464,10 @@ class HRTFProjectManager(ctk.CTk):
         if not os.path.exists(inspector):
             return self.log(f"Error: {inspector} missing")
 
-        self.log("--> Inspecting aligned mesh...")
-        self._pending_inspect_check = True
-        cmd = [sys.executable, "-u", inspector, "inspect_aligned", mesh_dir]
-        self.run_external_command(cmd)
+        if self.is_running:
+            return self.log("[!] Process running...")
+        self._inspect_flow = InspectFlow(self._inspect_flow_io(mesh_dir))
+        self._inspect_flow.start()
 
     def restore_pre_tunnel_mesh(self):
         """Put aligned_head.pre_cutpatch.ply (the mesh from before the first
@@ -1517,12 +1478,12 @@ class HRTFProjectManager(ctk.CTk):
         store = self._store(mesh_dir)
         if not store.has_aligned_backup():
             self.update_workflow_state()
-            return self.log("No backup from before a see-through-hole fix found; nothing to restore.")
+            return self.log("No backup from before the Step 2 fixes found; nothing to restore.")
         if not messagebox.askyesno(
-                "Restore mesh from before hole fix",
-                "Replace aligned_head.ply with the backup made before your first "
-                "see-through-hole fix?\n\nAll hole fixes since then are undone, and the "
-                "mesh will count as not inspected (Step 2)."):
+                "Restore mesh from before Step 2 fixes",
+                "Replace aligned_head.ply with the backup made before the first "
+                "Step 2 fix (automatic repair or hole fix)?\n\nAll Step 2 fixes since "
+                "then are undone, and the mesh will count as not inspected (Step 2)."):
             return
         try:
             store.restore_aligned_backup()
@@ -1532,7 +1493,7 @@ class HRTFProjectManager(ctk.CTk):
                                  "aligned_head.ply was not changed.")
             return self.log(f"[!] Restore failed: {e}")
         self.log("--> Restored aligned_head.ply from aligned_head.pre_cutpatch.ply "
-                 "(mesh from before the see-through-hole fix). Aligned check cleared - run "
+                 "(mesh from before the Step 2 fixes). Aligned check cleared - run "
                  "'2. Inspect & Fix Mesh' again.")
         self.update_workflow_state()
 
