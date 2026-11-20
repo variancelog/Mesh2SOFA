@@ -470,6 +470,16 @@ class ProjectStore:
                 pass
         return removed
 
+    def clear_import_report(self):
+        """Delete import_report.json (a new import must never be judged by the
+        previous mesh's report). True if it existed."""
+        p = os.path.join(self.mesh_dir, "import_report.json")
+        try:
+            os.remove(p)
+            return True
+        except FileNotFoundError:
+            return False
+
     def write_project(self, data):
         with open(self.project_json_path, "w") as f:
             json.dump(data, f, indent=4)

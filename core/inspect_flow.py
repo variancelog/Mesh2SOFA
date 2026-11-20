@@ -29,9 +29,12 @@ def _counts(check):
 
 
 def _n(counts, key):
+    """A count as int. Missing, unparsable AND negative values read as 0: a
+    negative count is a sentinel (PyMeshLab reports -1 for "could not measure"),
+    never a real number of problems, so it must not make a sentence."""
     v = counts.get(key)
     try:
-        return int(v or 0)
+        return max(0, int(v or 0))
     except (TypeError, ValueError):
         return 0
 
@@ -122,11 +125,92 @@ def describe(check):
             out.append("The mesh is inside out (its surface faces inward).")
     except (TypeError, ValueError):
         pass
+    if is_critical(check) and not out:
+        out.append("The mesh has a problem the checker could not measure.")
     if any(_n(c, k) > 0 for k in ("dup_verts", "null_faces", "unreferenced_verts",
                                   "tiny_faces")):
         out.append("There are also a few minor clean-up items (they don't block "
                    "the next step).")
     return out
+
+
+NEEDED, DONE_STATE = "needed", "done"
+
+
+def _import_clean(import_report):
+    """True if import_report.json (written by mesh_inspector.import_mesh) says
+    the mesh was clean AFTER import: not critical and genus 0. Uses the
+    recorded after-severity; falls back to the counts only if severity is
+    absent. Anything missing, unreadable or unclear is not clean."""
+    if not isinstance(import_report, dict):
+        return False
+    after = import_report.get("after")
+    if not isinstance(after, dict):
+        return False
+    counts = after.get("counts")
+    counts = counts if isinstance(counts, dict) else {}
+    try:
+        genus_bad = int(counts.get("genus") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+    if genus_bad:
+        return False
+    severity = after.get("severity")
+    if severity in ("ok", "minor"):
+        return True
+    if severity is not None:        # "critical" or something unknown
+        return False
+    # No severity recorded: judge from the counts. Negative = unknown = not clean.
+    if not counts:
+        return False
+    for k, v in counts.items():
+        if k == "volume":
+            continue
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v < 0:
+            return False
+    return not other_criticals(counts)
+
+
+def _report_is_for(import_report, raw_name):
+    """True if the import report names the mesh that is the project's current
+    raw mesh (basename compare). A stale report from an earlier import, or one
+    with no filename, is not trusted."""
+    import os
+    if not isinstance(import_report, dict) or not raw_name:
+        return False
+    name = import_report.get("filename")
+    if not isinstance(name, str) or not name:
+        return False
+    return (os.path.normcase(os.path.basename(name))
+            == os.path.normcase(os.path.basename(str(raw_name))))
+
+
+def step2_state(import_report, aligned_check, raw_name):
+    """Does Step 2 (Inspect & Fix) still need doing? "needed" or "done".
+    Process & Grade is enabled only in the "done" state.
+
+      aligned_check present, not critical -> done
+      aligned_check present, critical     -> needed
+      no aligned_check (never inspected, or cleared by re-align / Restore):
+          done only if the import report shows a clean mesh after import
+          (alignment only rotates/translates, so it stays valid); otherwise needed.
+      missing / unreadable import report  -> needed
+
+    raw_name is the project's current raw mesh (file name or path): an import
+    report whose "filename" differs (stale, from an earlier import) or is missing
+    is not trusted, so it counts as needed.
+
+    The first two arguments are the parsed JSON dicts, or None when the file is absent or
+    unreadable. An aligned_check without a recognised severity counts as absent."""
+    info = _info(aligned_check)
+    sev = info.get("severity")
+    if sev == "critical":
+        return NEEDED
+    if sev in ("ok", "minor"):
+        return DONE_STATE
+    if _report_is_for(import_report, raw_name) and _import_clean(import_report):
+        return DONE_STATE
+    return NEEDED
 
 
 def counts_log_line(check):

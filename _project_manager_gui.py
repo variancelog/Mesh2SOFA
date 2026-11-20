@@ -18,7 +18,7 @@ if CORE_DIR not in sys.path:
 
 from project_store import (ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED,
                            RESOLUTION_MODES, resolution_mode)
-from inspect_flow import InspectFlow
+from inspect_flow import InspectFlow, step2_state
 
 # Hide the console window so running as .py looks like .pyw (no terminal).
 # A real (hidden) console still exists, so child processes (e.g. NumCalc.exe)
@@ -1053,6 +1053,8 @@ class HRTFProjectManager(ctk.CTk):
             # New base mesh — prior alignment / inspection / grading no longer
             # apply.  Clear them so Align + Inspect & Fix must be redone.
             removed = self._store(project_mesh_dir).reset_mesh_artifacts()
+            if self._store(project_mesh_dir).clear_import_report():
+                removed.append("import_report.json")
             if removed:
                 self.log(
                     "--> Cleared prior mesh artifacts: "
@@ -1205,10 +1207,18 @@ class HRTFProjectManager(ctk.CTk):
         """Return True if mesh_check.json is absent (backward compat) or has no critical severity."""
         return self._store(mesh_path).read_check(MESH_GRADED) != CleanState.CRITICAL
 
-    def _aligned_check_passed(self, mesh_path):
-        """True if aligned_check.json is present and has no critical severity.
-        Absent => not yet inspected => the Inspect & Fix step is not complete."""
-        return self._store(mesh_path).read_check(MESH_ALIGNED) == CleanState.CLEAN
+    def _step2_state(self, mesh_path):
+        """"needed" or "done" (core/inspect_flow.step2_state): does Step 2 still
+        need doing? Gates Process & Grade. Reads aligned_check.json and
+        import_report.json; a missing/unreadable file is passed as None."""
+        report = None
+        try:
+            with open(os.path.join(mesh_path, "import_report.json")) as f:
+                report = json.load(f)
+        except Exception:
+            report = None
+        return step2_state(report, self._store(mesh_path).read_check_data(MESH_ALIGNED),
+                           os.path.basename(self.entry_raw.get() or ""))
 
     # --- ONE-CLICK STEP 2 (decision logic lives in core/inspect_flow.py) ---
 
@@ -1295,6 +1305,9 @@ class HRTFProjectManager(ctk.CTk):
         non_tunnel_issues = [c for c in critical if c not in tunnel_issues]
 
         base_msg = f"Mesh imported as '{filename}'."
+        if data.get("message"):
+            # repair refused (e.g. several large separate pieces): say why, plainly
+            base_msg += "\n\n" + data["message"]
 
         if non_tunnel_issues:
             # Geometry criticals survived auto-repair — unusual, surface them.
@@ -1302,7 +1315,8 @@ class HRTFProjectManager(ctk.CTk):
             messagebox.showwarning(
                 "Import Complete — Issues Remain",
                 f"{base_msg}\n\nResidual critical issues after auto-repair:\n{issues_txt}\n\n"
-                "Run Step 2 (Inspect & Fix Mesh) after alignment to address these.",
+                "Run Step 2 (Inspect & Fix Mesh) after alignment to address these; "
+                "Process & Grade stays locked until it is done.",
             )
         elif tunnel_issues:
             # Tunnels detected but not removable before alignment.
@@ -1366,10 +1380,9 @@ class HRTFProjectManager(ctk.CTk):
         mesh_path = self.get_mesh_dir()
         
         step_align_done = os.path.exists(os.path.join(mesh_path, "aligned_head.ply"))
-        # Inspect & Fix is OPTIONAL: it does not gate grading (grading just uses
-        # whatever aligned_head.ply currently is). step_inspect_done only drives
-        # the Inspect button's own "done" styling.
-        step_inspect_done = step_align_done and self._aligned_check_passed(mesh_path)
+        # Step 2 gates Process & Grade: it is "done" when the aligned check is
+        # non-critical, or (no check yet) the import report was clean.
+        step_inspect_done = step_align_done and self._step2_state(mesh_path) == "done"
         step_grade_done = (step_align_done
                            and os.path.exists(os.path.join(mesh_path, "Left_Graded.ply"))
                            and self._mesh_check_passed(mesh_path))
@@ -1394,6 +1407,11 @@ class HRTFProjectManager(ctk.CTk):
         if step_numcalc_done: progress_index = 5
         if step_sofa_done: progress_index = 6
 
+        # While Step 2 is needed the next step is Step 2 itself, never a later
+        # one (even if graded meshes exist from an earlier run).
+        if step_align_done and not step_inspect_done:
+            progress_index = min(progress_index, 1)
+
         self.project_data["progress"] = progress_index
 
         def set_btn(btn, state_idx):
@@ -1405,14 +1423,17 @@ class HRTFProjectManager(ctk.CTk):
                 btn.configure(state="disabled", fg_color=COLOR_LOCKED, text_color="grey")
 
         set_btn(self.btn_align, 0)
-        set_btn(self.btn_process, 1)
+        if step_align_done and not step_inspect_done:
+            # Step 2 still needs doing: Process & Grade stays locked.
+            self.btn_process.configure(state="disabled", fg_color=COLOR_LOCKED, text_color="grey")
+        else:
+            set_btn(self.btn_process, 1)
         set_btn(self.btn_blender, 2)
         set_btn(self.btn_numcalc, 4)
         set_btn(self.btn_sofa, 5)
 
-        # Inspect & Fix: optional side-step. Available once align is done; shows
-        # "done" styling once the aligned mesh passes inspection, but it never
-        # blocks Process & Grade.
+        # Inspect & Fix: active (green) while it still needs doing, done (blue,
+        # still clickable to re-check) otherwise.
         if not step_align_done:
             self.btn_inspect.configure(state="disabled", fg_color=COLOR_LOCKED, text_color="grey")
         elif step_inspect_done:
@@ -1472,8 +1493,8 @@ class HRTFProjectManager(ctk.CTk):
     def restore_pre_tunnel_mesh(self):
         """Put aligned_head.pre_cutpatch.ply (the mesh from before the first
         in-app tunnel fix since the last alignment) back as aligned_head.ply.
-        The aligned check is cleared, so the mesh counts as uninspected and
-        grading will warn until Step 2 is run again."""
+        The aligned check is cleared, so Step 2 is judged again from the import
+        report (Process & Grade stays locked unless that was clean)."""
         mesh_dir = self.get_mesh_dir()
         store = self._store(mesh_dir)
         if not store.has_aligned_backup():
@@ -1497,28 +1518,6 @@ class HRTFProjectManager(ctk.CTk):
                  "'2. Inspect & Fix Mesh' again.")
         self.update_workflow_state()
 
-    def _aligned_inspection_warning(self, mesh_dir):
-        """Return a warning string if grading should warn the user (mesh never
-        inspected, or inspection found unresolved criticals), else None.
-        Inspect & Fix is optional, so this only warns -- it never blocks.
-
-        Note: a corrupt aligned_check.json folds into NOT_RUN (the "not inspected"
-        warning), which is strictly safer than the old silent pass and matches the
-        CleanState design."""
-        store = self._store(mesh_dir)
-        state = store.read_check(MESH_ALIGNED)
-        if state == CleanState.NOT_RUN:
-            return ("The aligned mesh has not been inspected (Step 2).\n"
-                    "Grading an un-inspected mesh may fail later if it has "
-                    "self-intersections or see-through holes (tunnels).")
-        if state == CleanState.CRITICAL:
-            counts = store.read_check_data(MESH_ALIGNED).get("aligned", {}).get("counts", {})
-            summary = ", ".join(f"{k}={v}" for k, v in counts.items()
-                                if v not in (0, None))
-            return ("Inspection found UNRESOLVED critical issues on the aligned "
-                    f"mesh:\n  {summary}\nGrading anyway may produce a bad result.")
-        return None
-
     # --- Updated to work with new browse_blender and brows_bins functions ---
     def run_processing(self):
         mesh_dir = self.get_mesh_dir()
@@ -1526,14 +1525,10 @@ class HRTFProjectManager(ctk.CTk):
         if not os.path.exists(aligned_mesh):
             return self.log("Error: Run '1. Align Mesh' first (aligned_head.ply not found).")
 
-        warn = self._aligned_inspection_warning(mesh_dir)
-        if warn:
-            from tkinter import messagebox
-            if not messagebox.askyesno("Proceed to grading?",
-                                       f"{warn}\n\nProceed with grading anyway?",
-                                       icon="warning", parent=self):
-                self.log("--> Grading cancelled (run Inspect & Fix first, or proceed when prompted).")
-                return
+        # Silent guard: the button is locked while Step 2 is needed, so this only
+        # triggers if some other path calls us.
+        if self._step2_state(mesh_dir) != "done":
+            return self.log("Process & Grade is locked until '2. Inspect & Fix Mesh' is done.")
         self._launch_processing(mesh_dir, aligned_mesh)
 
     def _launch_processing(self, mesh_dir, aligned_mesh):

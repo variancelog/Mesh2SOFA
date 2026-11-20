@@ -557,6 +557,12 @@ def import_mesh(dest_path, blender_exe):
     mesh_dir = os.path.dirname(os.path.abspath(str(dest_path)))
     filename = os.path.basename(str(dest_path))
 
+    # A failed import must not leave the previous mesh's report behind.
+    try:
+        os.remove(os.path.join(mesh_dir, "import_report.json"))
+    except FileNotFoundError:
+        pass
+
     log(f"--> Import: inspecting {filename}...")
     before = inspect_mesh(dest_path)
     log(format_report(before))
@@ -621,6 +627,7 @@ def import_mesh(dest_path, blender_exe):
         "filename": filename,
         "blender_dissolve_run": blender_ran,
         "engine": result["engine"],
+        "message": result.get("message"),   # plain sentence if repair refused (large pieces)
         "before": {
             "severity": before["severity"],
             "critical": before["critical"],

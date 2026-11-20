@@ -27,7 +27,7 @@ def _write_json(path, data):
 
 # --- reference implementations of the OLD inline rules, to lock the truth table ---
 def _old_aligned_check_passed(mesh_path):
-    """Verbatim logic of the old GUI _aligned_check_passed."""
+    """Reference rule: aligned check present and non-critical (the old GUI helper, since replaced by inspect_flow.step2_state)."""
     p = os.path.join(mesh_path, "aligned_check.json")
     if not os.path.exists(p):
         return False
