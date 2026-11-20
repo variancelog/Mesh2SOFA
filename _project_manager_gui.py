@@ -1378,7 +1378,21 @@ class HRTFProjectManager(ctk.CTk):
             self.title("Mesh2SOFA")
 
         mesh_path = self.get_mesh_dir()
-        
+
+        # Step 0: Align needs a loaded project and a raw mesh whose import
+        # (inspect -> Blender cleanup -> repair) has FINISHED. The import worker
+        # writes import_report.json last, and Browse deletes any old report
+        # before starting, so the report is the "import complete" marker.
+        # Projects aligned before Step 0 existed have no report: an existing
+        # aligned_head.ply also counts, so they can still be re-aligned.
+        raw_mesh = self.entry_raw.get()
+        import_finished = (os.path.exists(os.path.join(mesh_path, "import_report.json"))
+                           or os.path.exists(os.path.join(mesh_path, "aligned_head.ply")))
+        step_import_done = bool(base_path and os.path.isdir(base_path)
+                                and raw_mesh and os.path.isfile(raw_mesh)
+                                and import_finished
+                                and not getattr(self, "_pending_import_check", False))
+
         step_align_done = os.path.exists(os.path.join(mesh_path, "aligned_head.ply"))
         # Step 2 gates Process & Grade: it is "done" when the aligned check is
         # non-critical, or (no check yet) the import report was clean.
@@ -1422,7 +1436,10 @@ class HRTFProjectManager(ctk.CTk):
             else:
                 btn.configure(state="disabled", fg_color=COLOR_LOCKED, text_color="grey")
 
-        set_btn(self.btn_align, 0)
+        if step_import_done:
+            set_btn(self.btn_align, 0)
+        else:
+            self.btn_align.configure(state="disabled", fg_color=COLOR_LOCKED, text_color="grey")
         if step_align_done and not step_inspect_done:
             # Step 2 still needs doing: Process & Grade stays locked.
             self.btn_process.configure(state="disabled", fg_color=COLOR_LOCKED, text_color="grey")
