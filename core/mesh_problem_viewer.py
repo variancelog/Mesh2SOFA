@@ -425,6 +425,9 @@ CONFIRM_LABEL = "Confirm this fix  [F]"
 CONFIRMED_LABEL = "Confirmed"
 APPLY_LABEL = "Apply selected fix  [C]"
 APPLY_LABEL_ALL = "Apply all selected fixes  [C]"
+CHIP_TICK = "\u2713 "
+APPLY_TOOLTIP = ("Computes all confirmed fixes together and shows the result. "
+                 "Nothing is saved until you press Keep.")
 ALL_CONFIRMED_CAPTION = "All defects confirmed."
 OPTION_CHANGED_NOTE = "Option changed, so this defect needs confirming again."
 ONLY_ONE_WAY_TEXT = "Only one way to fix this defect"
@@ -673,6 +676,17 @@ def progress_chips(handles, active, visited):
             state = "unseen"
         chips.append({"index": i, "state": state, "current": i == active})
     return chips
+
+
+def choice_lines(handles):
+    """After-view lines: the option chosen for every defect, in plain words."""
+    lines = []
+    for i, h in enumerate(handles):
+        li = h["sel"]
+        labels = h["labels"]
+        label = labels[li] if 0 <= li < len(labels) else None
+        lines.append(f"Defect {i + 1}: {option_text(label, li)[0]}")
+    return lines
 
 
 def advanced_rows(handles, pts):
@@ -1331,6 +1345,9 @@ class TunnelSelector:
 
     def progress_chips(self):
         return progress_chips(self.handles, self.active, self.visited)
+
+    def choice_lines(self):
+        return choice_lines(self.handles)
 
     def notes(self):
         h = self.handles[self.active]
@@ -2744,6 +2761,28 @@ def _build_qt_classes():
                 "color: #aaa; font-size: 11px; background: transparent;")
             dl.addWidget(self._lbl_rule)
 
+            # Progress row: "Confirmed k of n" + one clickable chip per defect
+            # (hidden when there is only one defect).
+            self._progress = QtWidgets.QFrame()
+            self._progress.setStyleSheet(
+                "QFrame#ProgressRow { border: 1px solid #3a3f48; border-radius: 6px; "
+                "background: transparent; }")
+            self._progress.setObjectName("ProgressRow")
+            pgl = QtWidgets.QVBoxLayout(self._progress)
+            pgl.setContentsMargins(8, 6, 8, 6)
+            pgl.setSpacing(6)
+            self._lbl_progress = QtWidgets.QLabel("")
+            self._lbl_progress.setStyleSheet(
+                "color: #9aa1ab; font-size: 11px; background: transparent;")
+            pgl.addWidget(self._lbl_progress)
+            self._chip_grid = QtWidgets.QGridLayout()
+            self._chip_grid.setContentsMargins(0, 0, 0, 0)
+            self._chip_grid.setSpacing(6)
+            pgl.addLayout(self._chip_grid)
+            self._chips = []
+            dl.addWidget(self._progress)
+            self._progress.hide()
+
             nav = QtWidgets.QHBoxLayout()
             self._btn_prev = QtWidgets.QPushButton("< Prev")
             self._lbl_defect = QtWidgets.QLabel("Defect 1 of 1")
@@ -2766,6 +2805,14 @@ def _build_qt_classes():
                 card.clicked.connect(lambda i=_i: self._card_clicked(i))
                 dl.addWidget(card)
                 self._cards.append(card)
+
+            self._btn_confirm = QtWidgets.QPushButton(CONFIRM_LABEL)
+            self._btn_confirm.setMinimumHeight(34)
+            self._btn_confirm.setToolTip(
+                "You have checked this defect and want this fix. Press again to "
+                "take the confirmation back.")
+            self._btn_confirm.clicked.connect(self._confirm_clicked)
+            dl.addWidget(self._btn_confirm)
 
             self._lbl_note = QtWidgets.QLabel("")
             self._lbl_note.setWordWrap(True)
@@ -2792,6 +2839,11 @@ def _build_qt_classes():
             self._lbl_after_note.setStyleSheet(
                 "color: #aaa; font-size: 11px; background: transparent;")
             al.addWidget(self._lbl_after_note)
+            self._lbl_after_choices = QtWidgets.QLabel("")
+            self._lbl_after_choices.setWordWrap(True)
+            self._lbl_after_choices.setStyleSheet(
+                "color: #ddd; font-size: 12px; background: transparent;")
+            al.addWidget(self._lbl_after_choices)
             self._btn_keep = QtWidgets.QPushButton(KEEP_LABEL.replace("&", "&&"))
             self._btn_keep.setToolTip(KEEP_TOOLTIP)
             self._btn_keep.setStyleSheet("QPushButton { background-color: #1f8f5c; }"
@@ -2804,21 +2856,6 @@ def _build_qt_classes():
             al.addWidget(self._btn_undo)
             panel_layout.addWidget(self._after)
             self._after.hide()
-
-            self._panel_status = QtWidgets.QLabel("Checking the mesh…")
-            self._panel_status.setWordWrap(True)
-            self._panel_status.setStyleSheet(
-                "color: #ccc; font-size: 11px; background: transparent;")
-            panel_layout.addWidget(self._panel_status)
-
-            panel_layout.addStretch()
-
-            self._btn_cut = QtWidgets.QPushButton("Apply fix  [C]")
-            self._btn_cut.setEnabled(False)
-            self._btn_cut.setToolTip("Computes the fix and shows you the result. "
-                                     "Nothing is saved until you press Keep.")
-            self._btn_cut.clicked.connect(self._request_cut)
-            panel_layout.addWidget(self._btn_cut)
 
             self._btn_view = QtWidgets.QPushButton("Show: Before / After  [P]")
             self._btn_view.setCheckable(True)
@@ -2848,6 +2885,28 @@ def _build_qt_classes():
                                      "hidden in ear folds show through.")
             self._btn_see.clicked.connect(self._toggle_see_through)
             panel_layout.addWidget(self._btn_see)
+
+            self._panel_status = QtWidgets.QLabel("Checking the mesh…")
+            self._panel_status.setWordWrap(True)
+            self._panel_status.setStyleSheet(
+                "color: #ccc; font-size: 11px; background: transparent;")
+            panel_layout.addWidget(self._panel_status)
+
+            panel_layout.addStretch()
+
+            self._btn_cut = QtWidgets.QPushButton(APPLY_LABEL)
+            self._btn_cut.setMinimumHeight(34)
+            self._btn_cut.setEnabled(False)
+            self._btn_cut.setToolTip(APPLY_TOOLTIP)
+            self._btn_cut.setStyleSheet(
+                "QPushButton:enabled { background-color: #2d6cc0; font-weight: bold; }")
+            self._btn_cut.clicked.connect(self._request_cut)
+            panel_layout.addWidget(self._btn_cut)
+            self._lbl_apply_cap = QtWidgets.QLabel("")
+            self._lbl_apply_cap.setWordWrap(True)
+            self._lbl_apply_cap.setStyleSheet(
+                "color: #9aa1ab; font-size: 11px; background: transparent;")
+            panel_layout.addWidget(self._lbl_apply_cap)
 
             # Collapsible "Advanced": technical labels, loop lengths, linking
             # numbers and the Blender export (collapsed by default, not persisted;
@@ -2895,7 +2954,7 @@ def _build_qt_classes():
             # has no other guard. Clicks still work; keys go to the filter.
             for _b in (self._btn_cut, self._btn_zoom, self._btn_whole, self._btn_see,
                        self._btn_adv, self._btn_export, self._btn_close, self._btn_prev,
-                       self._btn_next, self._btn_view, self._btn_keep,
+                       self._btn_next, self._btn_view, self._btn_keep, self._btn_confirm,
                        self._btn_undo, *self._cards):
                 _b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
 
@@ -3077,6 +3136,8 @@ def _build_qt_classes():
             self._decision.setVisible(not after)
             self._after.setVisible(after)
             self._btn_cut.setVisible(not after)
+            self._lbl_apply_cap.setVisible(not after)
+            self._btn_confirm.setVisible(not after)
             self._adv_box.setVisible(not after)
             self._lbl_adv.setText("\n".join(sel.advanced_rows()))
             self._lbl_adv.setVisible(True)
@@ -3094,6 +3155,10 @@ def _build_qt_classes():
             self._lbl_note.setText("\n\n".join(notes))
             self._lbl_note.setVisible(bool(notes))
             self._btn_cut.setEnabled(not locked and sel.can_apply())
+            self._btn_cut.setText(apply_label(n))
+            k = sel.confirmed_count()
+            self._lbl_apply_cap.setText(apply_caption(k, n))
+            self._sync_confirm_ui(sel, n, k, locked)
             self._btn_zoom.setEnabled(not sel.busy)
             self._btn_whole.setEnabled(not sel.busy)
             self._btn_see.setEnabled(not sel.busy)
@@ -3112,6 +3177,7 @@ def _build_qt_classes():
             self._btn_view.blockSignals(False)
             # After-view
             if after and sel.result_genus is not None:
+                self._lbl_after_choices.setText("\n".join(sel.choice_lines()))
                 self._lbl_after.setText(fixed_banner(sel.result_genus))
                 legend = sel.new_surface_legend()
                 self._lbl_after_note.setText(
@@ -3124,6 +3190,66 @@ def _build_qt_classes():
             self._btn_keep.setEnabled(after and not locked)
             self._btn_undo.setEnabled(after and not locked)
             self._place_overlays()
+
+        def _confirm_clicked(self, *_):
+            sel = self._selector
+            if sel is None or sel.busy or self._prompt_open:
+                return
+            sel.confirm_active()
+
+        def _chip_clicked(self, i):
+            sel = self._selector
+            if sel is None or sel.busy or self._prompt_open or sel.mode != "choose":
+                return
+            if i != sel.active:
+                sel.set_active(i)
+
+        def _sync_confirm_ui(self, sel, n, k, locked):
+            """Progress row (chips), Confirm button state."""
+            self._progress.setVisible(n > 1 and sel.mode == "choose")
+            self._lbl_progress.setText(f"Confirmed {k} of {n}")
+            while len(self._chips) < n:
+                i = len(self._chips)
+                chip = QtWidgets.QPushButton()
+                chip.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+                chip.setFixedHeight(26)
+                chip.setMinimumWidth(44)
+                chip.clicked.connect(lambda _=False, i=i: self._chip_clicked(i))
+                self._chip_grid.addWidget(chip, i // 5, i % 5)
+                self._chips.append(chip)
+            for i, chip in enumerate(self._chips):
+                chip.setVisible(i < n)
+            for spec in sel.progress_chips():
+                chip = self._chips[spec["index"]]
+                st = spec["state"]
+                chip.setText((CHIP_TICK if st == "confirmed" else "") + str(spec["index"] + 1))
+                color = {"unseen": "#9aa1ab", "seen": "#e7e9ec",
+                         "confirmed": "#7fd6a0"}[st]
+                border = "#1f8f5c" if st == "confirmed" else "#3a3f48"
+                if spec["current"]:
+                    border = "#e7e9ec"
+                width = 2 if spec["current"] else 1
+                chip.setStyleSheet(
+                    "QPushButton { background: transparent; color: %s; "
+                    "border: %dpx solid %s; border-radius: 12px; padding: 0px 8px; }"
+                    "QPushButton:disabled { color: #666; }" % (color, width, border))
+                chip.setToolTip(f"Defect {spec['index'] + 1}: "
+                                + {"unseen": "not looked at yet", "seen": "not confirmed",
+                                   "confirmed": "confirmed"}[st])
+                chip.setEnabled(not locked and sel.mode == "choose")
+            confirmed = bool(sel.handles[sel.active]["confirmed"])
+            self._btn_confirm.setText(confirm_label(confirmed))
+            if confirmed:
+                self._btn_confirm.setStyleSheet(
+                    "QPushButton { background: transparent; color: #7fd6a0; "
+                    "border: 2px solid #1f8f5c; font-weight: bold; }")
+            else:
+                self._btn_confirm.setStyleSheet(
+                    "QPushButton { background-color: #1f8f5c; font-weight: bold; }"
+                    "QPushButton:disabled { background-color: #444; }")
+            self._btn_confirm.setEnabled(
+                not locked and sel.mode == "choose"
+                and sel.option_usable(sel.active, sel.handles[sel.active]["sel"]))
 
         def _selector_status(self, text, color):
             self._panel_status.setText(text)

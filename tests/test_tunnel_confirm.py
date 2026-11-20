@@ -304,3 +304,13 @@ def test_no_recommendation_api_left():
         assert not hasattr(mpv, name)
     for name in ("recommendation", "can_apply_recommended", "apply_recommended"):
         assert not hasattr(mpv.TunnelSelector, name)
+
+
+# --- 6b: after-view choice lines ---------------------------------------------
+def test_choice_lines_name_each_defect_choice(tmp_path, dtorus_pairs):  # noqa: F811
+    sel, _ = _two_defects(tmp_path, dtorus_pairs)
+    lines = sel.choice_lines()
+    assert len(lines) == 2
+    assert lines[0].startswith("Defect 1: ") and lines[1].startswith("Defect 2: ")
+    h = sel.handles[0]
+    assert lines[0] == "Defect 1: " + mpv.option_text(h["labels"][h["sel"]], h["sel"])[0]
