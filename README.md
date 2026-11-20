@@ -57,6 +57,19 @@ To use this orchestrator, you must have the following installed:
     * Search for "Mesh2SOFA Automation" in the list and enable it by checking the box (it should be checked by default).
     * The **Mesh2SOFA** panel will now always be available in the 3D Viewport sidebar (press 'N' to open the sidebar, or enable it from the "View" menu).
 
+### Where settings are stored
+
+**Settings moved out of the repo.** Your Mesh2HRTF / Blender / grading-tool paths now live in a per-user file
+(`app_settings.json` in `%LOCALAPPDATA%\Mesh2SOFA\` on Windows, `~/Library/Application Support/Mesh2SOFA/` on macOS,
+`~/.config/Mesh2SOFA/` on Linux) instead of the repo's `app_settings.json`, which is no longer tracked. The repo
+ships `app_settings.template.json` as a key reference. The first run imports any values from an old repo-root
+`app_settings.json`.
+
+*Upgrading from GitHub:* if you edited `app_settings.json`, `git pull` will refuse ("local changes would be
+overwritten"). Move `app_settings.json` out of the repo folder, pull, then put it back; the first run imports it.
+If you never edited it, nothing is lost. The Blender add-on is now v1.2.1 (it reads the per-user file): re-install it
+in Blender.
+
 ## Usage
 
 1.  Run the main application:

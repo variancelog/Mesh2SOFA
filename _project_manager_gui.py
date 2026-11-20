@@ -16,6 +16,7 @@ CORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core")
 if CORE_DIR not in sys.path:
     sys.path.insert(0, CORE_DIR)
 
+import app_settings
 from project_store import (ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED,
                            RESOLUTION_MODES, resolution_mode)
 from inspect_flow import InspectFlow, step2_state
@@ -441,12 +442,8 @@ class HRTFProjectManager(ctk.CTk):
         self.title("Mesh2SOFA")
         self.geometry("800x800")
         
-        self.app_settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_settings.json")
-        self.app_settings = {
-            "mesh2hrtf_path": "C:/Mesh2HRTF/mesh2hrtf",
-            "blender_path": "",
-            "grading_bin_path": os.getcwd()
-        }
+        self.app_settings = dict(app_settings.DEFAULTS)
+        self._settings_notes = []
         self.load_app_settings()
 
         # Data State
@@ -614,6 +611,7 @@ class HRTFProjectManager(ctk.CTk):
         # LOGGING AREA
         self.textbox = ctk.CTkTextbox(self.frame_actions, height=150)
         self.textbox.grid(row=10, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+        self._flush_settings_notes()
 
         self.btn_stop = ctk.CTkButton(self.frame_actions, text="STOP PROCESS", fg_color=COLOR_ERROR, state="disabled", command=self.kill_process)
         self.btn_stop.grid(row=11, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
@@ -1099,13 +1097,18 @@ class HRTFProjectManager(ctk.CTk):
 
     # --- STATE MANAGEMENT ---
     def load_app_settings(self):
-        if os.path.exists(self.app_settings_file):
-            try:
-                with open(self.app_settings_file, 'r') as f:
-                    data = json.load(f)
-                    self.app_settings.update(data)
-            except Exception:
-                pass
+        self.app_settings, notes = app_settings.load()
+        if not self.app_settings.get("grading_bin_path"):
+            self.app_settings["grading_bin_path"] = os.getcwd()
+        # The log widget may not exist yet (called from __init__); flush later.
+        self._settings_notes = list(notes)
+        self._flush_settings_notes()
+
+    def _flush_settings_notes(self):
+        if self._settings_notes and hasattr(self, "textbox"):
+            for n in self._settings_notes:
+                self.log("[i] " + n)
+            self._settings_notes = []
 
     def save_app_settings(self):
         self.app_settings.update({
@@ -1113,11 +1116,9 @@ class HRTFProjectManager(ctk.CTk):
             "blender_path": self.entry_blender.get(),
             "grading_bin_path": self.entry_bins.get()
         })
-        try:
-            with open(self.app_settings_file, 'w') as f:
-                json.dump(self.app_settings, f, indent=4)
-        except Exception:
-            pass
+        err = app_settings.save(self.app_settings)
+        if err:
+            self.log("[!] " + err)
 
     def update_ui_from_data(self):
         d = self.project_data

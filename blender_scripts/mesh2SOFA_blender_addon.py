@@ -7,7 +7,7 @@ import math
 bl_info = {
     "name": "Mesh2SOFA Automation",
     "author": "Mesh2SOFA",
-    "version": (1, 2, 0),
+    "version": (1, 2, 1),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Mesh2SOFA",
     "description": "Automates material assignment, skin/hair boundary conditions and project export for Mesh2HRTF",
@@ -326,13 +326,36 @@ def validate_m2h_path(user_path):
     return user_path
 
 
+def user_settings_path():
+    """Mirror of core/app_settings.user_settings_path() (the add-on cannot import core).
+    tests/test_app_settings.py asserts the two agree."""
+    import sys
+    override = os.environ.get("MESH2SOFA_SETTINGS_DIR")
+    if override:
+        folder = override
+    elif sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local")
+        folder = os.path.join(base, "Mesh2SOFA")
+    elif sys.platform == "darwin":
+        folder = os.path.join(os.path.expanduser("~"), "Library",
+                              "Application Support", "Mesh2SOFA")
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        if xdg and os.path.isabs(xdg):
+            folder = os.path.join(xdg, "Mesh2SOFA")
+        else:
+            folder = os.path.join(os.path.expanduser("~"), ".config", "Mesh2SOFA")
+    return os.path.join(folder, "app_settings.json")
+
+
 def get_project_settings():
     base_path = bpy.path.abspath("//")
     json_path = os.path.join(base_path, "project.json")
 
-    # Locate app_settings.json next to this script
+    # Per-user settings file first, then the legacy file next to this script
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    app_settings_path = os.path.join(script_dir, "app_settings.json")
+    candidate_paths = [user_settings_path(), os.path.join(script_dir, "app_settings.json")]
 
     settings = {
         "m2h_path": DEFAULT_M2H_PATH,
@@ -341,12 +364,16 @@ def get_project_settings():
     }
 
     # Load app settings
-    if os.path.exists(app_settings_path):
-        try:
-            with open(app_settings_path, 'r') as f:
-                app_data = json.load(f)
-                settings["m2h_path"] = app_data.get("mesh2hrtf_path", DEFAULT_M2H_PATH)
-        except: pass
+    for app_settings_path in candidate_paths:
+        if os.path.exists(app_settings_path):
+            try:
+                with open(app_settings_path, 'r') as f:
+                    app_data = json.load(f)
+                m2h = app_data.get("mesh2hrtf_path")
+                if m2h:
+                    settings["m2h_path"] = m2h
+                    break
+            except: pass
 
     # Load project settings
     if os.path.exists(json_path):

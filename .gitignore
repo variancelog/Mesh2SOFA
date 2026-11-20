@@ -9,6 +9,7 @@ venv/
 # --- App Specific Configuration ---
 # Ignores local path settings so others don't overwrite their configs
 project.json
+app_settings.json
 claude.md
 context.md
 

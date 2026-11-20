@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.8.1 (2026-11-20) — Per-User App Settings
+
+Your Mesh2HRTF / Blender / grading-tool paths move out of the repo into a per-user settings file, so
+`app_settings.json` no longer shows as modified at every commit, and the installed Blender add-on finally finds it.
+
+**1. Settings moved out of the repo**
+- Settings now live in `app_settings.json` in `%LOCALAPPDATA%\Mesh2SOFA\` (Windows),
+  `~/Library/Application Support/Mesh2SOFA/` (macOS) or `$XDG_CONFIG_HOME` / `~/.config/Mesh2SOFA/` (Linux);
+  `MESH2SOFA_SETTINGS_DIR` overrides the folder on every OS.
+- The repo-root `app_settings.json` is no longer tracked; `app_settings.template.json` documents the keys.
+- The first run imports the non-empty values from an old repo-root `app_settings.json` (once; the old file is left alone).
+- A broken settings file or a failed save is reported in the log instead of being ignored.
+- New `core/app_settings.py` (stdlib only) + `tests/test_app_settings.py`.
+
+**2. Blender add-on v1.2.1**
+- Reads the per-user settings file first, then the legacy file next to itself. Before, the installed add-on never
+  found the settings and always used the default Mesh2HRTF path. **Re-install the add-on in Blender.**
+
+**3. Upgrading from GitHub**
+- If you edited `app_settings.json`, `git pull` will refuse ("local changes would be overwritten"). Move
+  `app_settings.json` out of the repo folder, pull, then put it back; the first run imports it. If you never
+  edited it, nothing is lost.
+
 ## v1.8.0 (2026-11-20) — Guided Step 2, Tunnel Fixer Overhaul & Import-Gated Align
 
 Step 2 (Inspect & Fix) becomes a one-click, required step before grading, the tunnel fixer
