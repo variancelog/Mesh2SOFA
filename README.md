@@ -105,7 +105,7 @@ in Blender.
     * **7. Generate Mastered SOFA Files** produces four SOFA file variants: diffuse-field equalized and non-equalized, at both 44.1 kHz and 48 kHz. Either variant can be used with SPARTA Binauraliser (which has a built-in optional "Apply Diffuse-Field EQ" setting), while renderers such as APL Virtuoso expect pre-equalized files.
 
     * **EXTRAS:**
-      * **Generate DFHRTF Files** generates tilted diffuse-field responses as CSV files for left, right, and average channels, plus frequency response plots. You can specify a tilt value (e.g. -1.0 dB/octave) and run it multiple times to test different outputs.
+      * **Generate DFHRTF Files** generates tilted diffuse-field responses as CSV files for left, right, and average channels, plus frequency response plots. You can specify a tilt value (e.g. -1.0 dB/octave) and run it multiple times to test different outputs. It also writes a convolution-ready stereo minimum-phase impulse of the same curve (`... MinPhase.wav`, 2 ch, 4096 samples, 32-bit float).
       * **Generate Paraview VTK Files** exports pressure data from your simulation into VTK format for a specified frequency range. Use the included `_vtk_viewer.py` tool (or ParaView) to interactively visualize the acoustic pressure fields around the head model.
 
 ## Blender Steps

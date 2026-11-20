@@ -7,6 +7,7 @@ import scipy.fft as fft
 import matplotlib.pyplot as plt
 import csv
 import re
+from scipy.io import wavfile
 
 # Shared diffuse-field weighting (n-design auto-detection + ghost-node hull for
 # open/hemispherical grids). Lives in core/ alongside this script; when the GUI /
@@ -84,6 +85,82 @@ def save_csv_stereo(filename, freqs, mag_l, mag_r):
         print(f"   [+] Saved CSV: {os.path.basename(filename)}")
     except IOError as e:
         print(f"[ERROR] Saving CSV: {e}")
+
+# ---- Minimum-phase stereo impulse (convolution-ready WAV) ----
+
+MINPHASE_N_FFT = 65536
+MINPHASE_FLAT_LO = 20.0
+MINPHASE_FLAT_HI = 20000.0
+
+
+def _band_mean_db(freqs, db, center, half_width_oct):
+    lo, hi = center / 2 ** half_width_oct, center * 2 ** half_width_oct
+    mask = (freqs >= lo) & (freqs <= hi)
+    if not np.any(mask):
+        raise ValueError(f"No frequency points in {lo:.0f}-{hi:.0f} Hz for channel alignment")
+    return float(np.mean(db[mask]))
+
+
+def align_channels_db(freqs, db_l, db_r, center=300.0, half_width_oct=0.5):
+    """Shift L and R so both have the common mean level in center +- half_width_oct."""
+    freqs = np.asarray(freqs, dtype=float)
+    db_l = np.asarray(db_l, dtype=float)
+    db_r = np.asarray(db_r, dtype=float)
+    m_l = _band_mean_db(freqs, db_l, center, half_width_oct)
+    m_r = _band_mean_db(freqs, db_r, center, half_width_oct)
+    target = 0.5 * (m_l + m_r)
+    return db_l + (target - m_l), db_r + (target - m_r)
+
+
+def minimum_phase_ir(freqs, db, fs, n_taps=4096, n_fft=MINPHASE_N_FFT):
+    """Minimum-phase impulse (n_taps) for a dB curve, via real-cepstrum homomorphic method.
+
+    The curve is log-frequency interpolated onto the FFT grid and held flat below
+    20 Hz and above 20 kHz. The tail gets a half-Hann fade over the last ~10 %."""
+    freqs = np.asarray(freqs, dtype=float)
+    db = np.asarray(db, dtype=float)
+    grid = np.fft.rfftfreq(n_fft, 1.0 / fs)
+    lo = max(MINPHASE_FLAT_LO, freqs[0])
+    hi = min(MINPHASE_FLAT_HI, freqs[-1], fs / 2.0)
+    lg = np.log(np.clip(grid, lo, hi))
+    db_grid = np.interp(lg, np.log(freqs), db)
+    log_mag = db_grid * (np.log(10.0) / 20.0)
+    c = np.fft.irfft(log_mag, n_fft)
+    fold = np.zeros(n_fft)
+    fold[0] = c[0]
+    fold[1:n_fft // 2] = 2.0 * c[1:n_fft // 2]
+    fold[n_fft // 2] = c[n_fft // 2]
+    h = np.fft.irfft(np.exp(np.fft.rfft(fold)), n_fft)[:n_taps].copy()
+    nf = max(1, int(n_taps * 0.1))
+    h[-nf:] *= 0.5 * (1 + np.cos(np.linspace(0, np.pi, nf)))
+    return h
+
+
+def design_minphase_stereo_ir(freqs, db_l, db_r, fs, n_taps=4096, headroom_db=0.5,
+                              return_info=False):
+    """Stereo min-phase IR, shape (n_taps, 2) float32 (col 0 = L, col 1 = R).
+
+    1. align channels on their 212-424 Hz mean, 2. min-phase each, 3. one common
+    gain so the highest spectral magnitude of either channel is -headroom_db."""
+    al_l, al_r = align_channels_db(freqs, db_l, db_r)
+    irs = [minimum_phase_ir(freqs, d, fs, n_taps) for d in (al_l, al_r)]
+    peak_db = max(20 * np.log10(np.abs(np.fft.rfft(h, MINPHASE_N_FFT)).max()) for h in irs)
+    gain_db = -headroom_db - peak_db
+    ir = (np.stack(irs, axis=1) * 10 ** (gain_db / 20.0)).astype(np.float32)
+    if return_info:
+        offs = (float(np.mean(al_l - np.asarray(db_l))), float(np.mean(al_r - np.asarray(db_r))))
+        return ir, {"offset_l_db": offs[0], "offset_r_db": offs[1], "gain_db": float(gain_db)}
+    return ir
+
+
+def save_wav_stereo(filename, ir, fs):
+    """Saves an (n, 2) impulse as a 32-bit float WAV."""
+    try:
+        wavfile.write(filename, int(round(fs)), np.asarray(ir, dtype=np.float32))
+        print(f"   [+] Saved WAV: {os.path.basename(filename)}")
+    except (IOError, OSError) as e:
+        print(f"[ERROR] Saving WAV: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -239,7 +316,15 @@ def main():
         name_avg = f"{prefix_str}{args.tilt:g} {base_name} {sim_meas_str} Avg.csv"
         save_csv_mono(os.path.join(args.output_dir, name_avg), target_freqs, val_avg)
     
-        print("\n[SUCCESS] Extras generated (3 CSVs + Plot).")
+        # Convolution-ready stereo minimum-phase impulse of the same curves
+        ir, info = design_minphase_stereo_ir(target_freqs, val_l, val_r, fs, return_info=True)
+        print(f"   -> MinPhase: L/R alignment offsets {info['offset_l_db']:+.2f} / "
+              f"{info['offset_r_db']:+.2f} dB (212-424 Hz), common gain {info['gain_db']:+.2f} dB, "
+              f"sample peak {np.abs(ir).max():.4f}")
+        name_wav = f"{prefix_str}{args.tilt:g} {base_name} {sim_meas_str} MinPhase.wav"
+        save_wav_stereo(os.path.join(args.output_dir, name_wav), ir, fs)
+
+        print("\n[SUCCESS] Extras generated (3 CSVs + Plot + MinPhase WAV).")
 
 if __name__ == "__main__":
     main()

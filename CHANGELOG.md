@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.8.2 (2026-11-20) — Minimum-Phase Stereo WAV
+
+The DFHRTF extras now also export the diffuse-field curve as a convolution-ready stereo minimum-phase impulse.
+
+**1. Minimum-phase stereo WAV in the DFHRTF extras**
+- "Generate DFHRTF Files" now also writes `<tilt> <name> <Simulated|Measured> MinPhase.wav`: a convolution-ready
+  stereo minimum-phase impulse of the same DF curve (2 ch, 4096 samples, 32-bit float, peak at sample 0,
+  flat below 20 Hz / above 20 kHz).
+- Levels: L/R aligned on their 212-424 Hz mean, then one common gain puts the highest spectral magnitude at -0.5 dB.
+- The log reports the alignment offsets, common gain and sample peak. Squiglink output is unchanged.
+- New helpers in `core/generate_extras.py` + `tests/test_minphase_ir.py`.
+
 ## v1.8.1 (2026-11-20) — Per-User App Settings
 
 Your Mesh2HRTF / Blender / grading-tool paths move out of the repo into a per-user settings file, so

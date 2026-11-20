@@ -73,3 +73,12 @@ If `--front_bias > 0` (and not `--squigify`), `generate_extras.py` multiplies th
 weights by `((1 + x)/2) ** front_bias`, where `x` is the forward component of each direction,
 then re-normalises. This emphasises frontal directions in the diffuse-field average. It is a
 Mesh2SOFA-side post-step and is deliberately kept out of the shared weighting module.
+
+## Min-phase impulse export
+
+Besides the CSVs, `generate_extras.py` writes `<prefix><tilt> <name> <Simulated|Measured> MinPhase.wav`: a
+2-channel, 4096-sample, 32-bit float WAV (sample rate of the input SOFA) holding the same DF curves as a
+minimum-phase impulse (peak at sample 0, flat below 20 Hz and above 20 kHz). Levels: the channels are first
+aligned on their mean level in 212-424 Hz (300 Hz +- 1/2 octave), then one common gain sets the highest
+spectral magnitude of either channel to -0.5 dB (so no sample can exceed full scale). The phase comes from the
+real cepstrum; the tail is truncated with a half-Hann fade. Not produced with `--squigify`.
