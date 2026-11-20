@@ -421,9 +421,15 @@ def test_restore_puts_backup_back_and_clears_check(tmp_path):
     assert open(mesh, "rb").read() == original
     assert store.read_check(ps.MESH_ALIGNED) == ps.CleanState.NOT_RUN
     assert not os.path.exists(ps.tmp_path_for(mesh))
-    # a later fix keeps the SAME (pre-first-fix) backup
+    # the backup is consumed: Restore button predicate is false, 2nd restore no-op
+    assert not store.has_aligned_backup()
+    assert store.restore_aligned_backup() is False
+    assert open(mesh, "rb").read() == original
+    # a later fix creates a FRESH backup (of the restored mesh): button returns
     ps.apply_with_backup(mesh, lambda: b"FIXED2", _write_bytes)
+    assert store.has_aligned_backup()
     assert open(store.aligned_backup_path, "rb").read() == original
+    assert open(mesh, "rb").read() == b"FIXED2"
 
 
 @pytest.mark.parametrize("bad", [b"", b"this is not a ply file"])
@@ -436,6 +442,8 @@ def test_restore_rejects_empty_or_unreadable_backup(tmp_path, bad):
         store.restore_aligned_backup()
     assert "backup" in str(ei.value)
     assert open(mesh, "rb").read() == b"CURRENT-GOOD-MESH"      # untouched
+    assert open(ps.backup_path_for(mesh), "rb").read() == bad   # backup untouched
+    assert store.has_aligned_backup()
     assert store.read_check(ps.MESH_ALIGNED) == ps.CleanState.CLEAN   # check kept
     assert not os.path.exists(ps.tmp_path_for(mesh))
 
@@ -697,6 +705,7 @@ def test_restore_accepts_complete_ascii_ply(tmp_path):
     open(ps.backup_path_for(mesh), "wb").write(data)
     assert ps.restore_backup(mesh) is True
     assert open(mesh, "rb").read() == data
+    assert not os.path.exists(ps.backup_path_for(mesh))
 
 
 def test_read_check_child_counts_faces_against_the_declared_number(tmp_path):

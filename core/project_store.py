@@ -286,24 +286,17 @@ def _validate_backup(backup):
 
 
 def restore_backup(mesh_path):
-    """Copy aligned_head.pre_cutpatch.ply back over `mesh_path` atomically
-    (tmp + os.replace). The backup is kept (it is still the pre-fix mesh) until
-    the next alignment deletes it. Returns True if restored, False if there is
-    no backup. Raises ValueError (mesh_path untouched) if the backup is empty or
+    """MOVE aligned_head.pre_cutpatch.ply over `mesh_path` atomically
+    (os.replace). The backup is consumed, so the GUI's Restore button hides; the
+    next fix / auto-repair creates a fresh backup (backup-if-absent). Returns
+    True if restored, False if there is no backup. Raises ValueError (mesh_path untouched) if the backup is empty or
     does not parse as a mesh with faces -- never replace a good mesh with a bad
     backup."""
     backup = backup_path_for(mesh_path)
     if not os.path.exists(backup):
         return False
     _validate_backup(backup)
-    import shutil
-    tmp = tmp_path_for(mesh_path)
-    try:
-        shutil.copy2(backup, tmp)
-        os.replace(tmp, mesh_path)
-    except BaseException:
-        _remove_quiet(tmp)
-        raise
+    os.replace(backup, mesh_path)
     return True
 
 
