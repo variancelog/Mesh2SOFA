@@ -16,6 +16,7 @@ import mesh_problem_viewer as mpv
 import project_store as ps
 from tunnel_loop_extractor import mesh_genus
 from tunnel_loop_locator import select_cut_loop
+from test_tunnel_safety import confirm_all
 
 
 # ---------------------------------------------------------------------------
@@ -313,11 +314,13 @@ def test_cut_goes_through_job_runner_and_finishes_on_callback(tmp_path, torus, t
         mock.MagicMock(), pts, [torus_pair], mesh_path=mesh, faces=faces,
         on_success=lambda: events.__setitem__("success", events["success"] + 1),
         busy_cb=lambda b: events["busy"].append(b), job_runner=runner)
+    confirm_all(sel)
     sel.apply_cut_and_patch()
     # nothing has run yet: the GUI thread returned immediately, panel is busy
     assert sel.busy and events["busy"] == [True]
     assert open(mesh, "rb").read() == before and "job" in queued
     # a second press while the cut is queued/running is ignored
+    confirm_all(sel)
     sel.apply_cut_and_patch()
     assert events["busy"] == [True]
 
@@ -356,6 +359,7 @@ def test_cut_failure_reported_via_finish_leaves_mesh_alone(tmp_path, torus, toru
         busy_cb=busy.append, status_cb=lambda t, c: statuses.append(t),
         job_runner=lambda job, finish: queued.update(job=job, finish=finish))
     sel.handles[0]["loops"][0] = np.asarray(faces[0], dtype=np.int64)  # will not sever
+    confirm_all(sel)
     sel.apply_cut_and_patch()
     err = None
     try:

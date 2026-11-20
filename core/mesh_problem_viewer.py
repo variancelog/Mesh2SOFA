@@ -421,16 +421,13 @@ TIGHT_MODE_NOTE = ("These loops can't be cut inside the app: the safe automatic 
                    "check did not pass for them, so Apply is disabled and your "
                    "mesh will not be changed. Use 'Export Loops for Blender' "
                    "(under Advanced, opened for you) and make the cut there.")
-RECOMMEND_LABEL = "Apply recommended fix  [R]"
-RECOMMEND_LABEL_ALL = "Apply all recommended fixes  [R]"
-RECOMMEND_CAPTION = ("Fills the hole for every defect. You'll see the result "
-                     "before anything is saved.")
-RECOMMEND_CAPTION_MIXED = ("Fills the hole where that is clear; for the other defects it "
-                           "uses the option you chose. You'll see the result before "
-                           "anything is saved.")
-RECOMMEND_TOOLTIP = ("Chooses 'Fill the hole' for every defect, computes the fix "
-                     "and shows you the result. Nothing is saved until you press "
-                     "Keep.")
+CONFIRM_LABEL = "Confirm this fix  [F]"
+CONFIRMED_LABEL = "Confirmed"
+APPLY_LABEL = "Apply selected fix  [C]"
+APPLY_LABEL_ALL = "Apply all selected fixes  [C]"
+ALL_CONFIRMED_CAPTION = "All defects confirmed."
+OPTION_CHANGED_NOTE = "Option changed, so this defect needs confirming again."
+ONLY_ONE_WAY_TEXT = "Only one way to fix this defect"
 ADVANCED_LABEL = "Advanced"
 NO_LOOPS_NOTE = ("A safe way to fix this automatically could not be found. "
                  "Your mesh has not been changed. Close this window and fix the "
@@ -574,8 +571,7 @@ def remaining_defects_note(shown, genus):
 
 # Head-wrapping loop guard (stage 5d): a candidate ring longer than this fraction of
 # the mesh bounding-box diagonal is suspicious (it probably wraps the head). The
-# loop finding is unchanged; the card warns and the defect is excluded from
-# "Apply recommended fix".
+# loop finding is unchanged; the card warns and the user decides.
 LONG_RING_FRAC = 0.25
 LONG_RING_WARNING = "This ring is unusually long - check it before applying"
 
@@ -618,6 +614,9 @@ def option_cards(labels, blocked_reasons, sel, previews=None, long_flags=None):
                     card["selected"] = False
                     card["tooltip"] = (tip + "\n\nPreview check failed: "
                                        + str(reason))
+            if len(labels) == 1 and card["enabled"]:
+                card["status"] = (ONLY_ONE_WAY_TEXT if not card["status"]
+                                  else ONLY_ONE_WAY_TEXT + "\n" + card["status"])
             if long_flags is not None and i < len(long_flags) and long_flags[i]:
                 card["warning"] = LONG_RING_WARNING
                 card["status"] = (LONG_RING_WARNING if not card["status"]
@@ -641,67 +640,39 @@ def loop_length_mm(pts, lp):
     return round(float(np.linalg.norm(np.diff(cl, axis=0), axis=1).sum()), 3)
 
 
-def _is_classified(h):
-    labels = h["labels"]
-    return (len(labels) == 2 and all(lb in OPTION_TITLE for lb in labels)
-            and "TUNNEL" in labels)
+def confirm_label(confirmed):
+    """Text of the Confirm button: a toggle, so the confirmed state needs no
+    extra words."""
+    return CONFIRMED_LABEL if confirmed else CONFIRM_LABEL
 
 
-def recommended_label(n_defects):
-    """Text of the recommended-fix button: says "all" when the panel shows more
-    than one defect (the caption underneath is easy to overlook)."""
-    return RECOMMEND_LABEL_ALL if n_defects > 1 else RECOMMEND_LABEL
+def apply_label(n_defects):
+    """Text of the Apply button: says "all" when the panel shows several defects."""
+    return APPLY_LABEL_ALL if n_defects > 1 else APPLY_LABEL
 
 
-def recommended_caption(handles):
-    """Caption under "Apply recommended fix": only claims "fills the hole" for
-    every defect when every defect is classified; otherwise says the user's own
-    choice is used for the others."""
-    if all(_is_classified(h) for h in handles):
-        return RECOMMEND_CAPTION
-    return RECOMMEND_CAPTION_MIXED
+def apply_caption(k, n):
+    """Caption under Apply: k = defects confirmed so far, n = defects in total."""
+    left = n - k
+    if left <= 0:
+        return ALL_CONFIRMED_CAPTION
+    return f"Confirm {left} more defect{'' if left == 1 else 's'} to enable."
 
 
-def recommended_selection(handles, usable=None):
-    """The "Apply recommended fix" choice. Returns (selection, reason): one option
-    index per defect, or (None, one-line reason) when there is no safe recommendation.
-
-    Classified defects (TUNNEL + HANDLE) take their TUNNEL loop ("Fill the hole").
-    A defect that is NOT classified (UNKNOWN / single option) has no recommendation:
-    it keeps the option the user explicitly chose (handle["chosen"], set by a
-    click or Space) and is refused until they have. An unavailable TUNNEL option
-    refuses the whole recommendation: there is deliberately no fallback to the
-    HANDLE option (that would be the software deciding). usable(hi, li) -> bool
-    says whether an option passed its safety check (default: all usable)."""
-    if not handles:
-        return None, "There is nothing to fix."
-    selection = []
-    for hi, h in enumerate(handles):
-        k = hi + 1
-        labels = h["labels"]
-        if any(h.get("long") or ()):
-            return None, (f"Defect {k}: a ring is unusually long (it may wrap "
-                          "around the head), so there is no recommendation - "
-                          "check it and choose for yourself.")
-        if _is_classified(h):
-            li = labels.index("TUNNEL")
-            if usable is not None and not usable(hi, li):
-                return None, (f"Defect {k}: 'Fill the hole' isn't available (it failed "
-                              "a safety check), so there is no recommendation - "
-                              "choose for yourself.")
+def progress_chips(handles, active, visited):
+    """One chip per defect for the progress row: state "confirmed" (the user
+    confirmed its fix), "seen" (looked at, not confirmed) or "unseen"; "current"
+    marks the active defect (which counts as seen)."""
+    chips = []
+    for i, h in enumerate(handles):
+        if h.get("confirmed"):
+            state = "confirmed"
+        elif i == active or i in visited:
+            state = "seen"
         else:
-            if not h.get("chosen"):
-                if len(labels) == 1 and h.get("blocked"):
-                    return None, (f"Defect {k}: only one way to fix it was found - "
-                                  "check it and choose it first.")
-                return None, (f"Defect {k}: couldn't tell which is the hole - choose "
-                              "an option for it first.")
-            li = h["sel"]
-            if usable is not None and not usable(hi, li):
-                return None, (f"Defect {k}: the option you chose isn't available (it "
-                              "failed a safety check).")
-        selection.append(li)
-    return selection, ""
+            state = "unseen"
+        chips.append({"index": i, "state": state, "current": i == active})
+    return chips
 
 
 def advanced_rows(handles, pts):
@@ -1230,7 +1201,6 @@ class TunnelSelector:
         self.job_runner = job_runner
         self.preview_runner = preview_runner
         self.busy = False           # True while a cut or a save is running
-        self.via = "manual"         # how the pending fix was chosen: "manual" | "recommended"
         self.mode = "choose"        # "choose" | "after"
         self.view = "before"        # what the main view shows: "before" | "after"
         self.result = None          # (pts, faces) of the unkept fix, mode "after"
@@ -1248,6 +1218,8 @@ class TunnelSelector:
         self.center = self.pts.mean(0)
         self.diag = float(np.linalg.norm(self.pts.max(0) - self.pts.min(0)))
         self.active = 0             # active defect index
+        self.visited = {0}          # defects the user has looked at (progress chips)
+        self.confirm_notes = {}     # defect index -> note shown until it is confirmed again
         # each: {"loops": [idx arrays], "labels": [str], "sel": int,
         #        "blocked": [(idx array, reason)]}
         self.handles = []
@@ -1267,7 +1239,7 @@ class TunnelSelector:
             self.handles.append({"loops": loops, "labels": labels, "sel": 0,
                                  "blocked": blocked, "linking": linking,
                                  "long": long_ring_flags(self.pts, loops, self.diag),
-                                 "chosen": False})   # True once the user picked an option
+                                 "confirmed": False})   # the user confirmed the selected fix
         if previews is None:
             previews = PREVIEWS_ENABLED and preview_runner is not None
         self.previews = None
@@ -1317,16 +1289,56 @@ class TunnelSelector:
         return option_cards(h["labels"], [r for (_lp, r) in h["blocked"]], h["sel"],
                             pv_states, h.get("long"))
 
-    def can_apply(self):
+    def selected_usable(self):
         """Every defect still has a usable (not failed-preview) selected option."""
         return all(self.option_usable(hi, h["sel"])
                    for hi, h in enumerate(self.handles))
+
+    def confirmed_count(self):
+        return sum(1 for h in self.handles if h["confirmed"])
+
+    def all_confirmed(self):
+        return bool(self.handles) and self.confirmed_count() == len(self.handles)
+
+    def can_apply(self):
+        """Apply is possible: every selected option is usable AND the user
+        confirmed every defect."""
+        return self.selected_usable() and self.all_confirmed()
+
+    def _clear_confirmation(self, hi):
+        """The selected fix of defect hi changed under a confirmation."""
+        h = self.handles[hi]
+        if h["confirmed"]:
+            h["confirmed"] = False
+            self.confirm_notes[hi] = OPTION_CHANGED_NOTE
+
+    def confirm_active(self):
+        """F / Confirm button: toggle "confirmed" on the active defect. Refused
+        (status line, no change) while busy, outside the choose view, or when the
+        selected option failed its preview. Never moves to another defect."""
+        if self.busy or self.mode != "choose":
+            return
+        hi = self.active
+        h = self.handles[hi]
+        if not self.option_usable(hi, h["sel"]):
+            self._status("This option isn't available (it failed a safety check), "
+                         "so it can't be confirmed.", COLOR_CUT_INACTIVE)
+            return
+        h["confirmed"] = not h["confirmed"]
+        if h["confirmed"]:
+            self.confirm_notes.pop(hi, None)
+        self._changed()
+
+    def progress_chips(self):
+        return progress_chips(self.handles, self.active, self.visited)
 
     def notes(self):
         h = self.handles[self.active]
         notes = defect_notes(h["labels"], len(self.handles), self.genus)
         if self.auto_see_through_note():
             notes.insert(0, HIDDEN_NOTE)
+        if self.active in self.confirm_notes and not h["confirmed"]:
+            notes.insert(0, self.confirm_notes[self.active])
         if self.new_surface_legend():
             notes.append(self.new_surface_legend())
         for hi, hh in enumerate(self.handles):
@@ -1363,6 +1375,7 @@ class TunnelSelector:
                 or self.mode != "choose" or self.busy):
             return
         self.active = idx
+        self.visited.add(idx)
         self.redraw()
         if zoom:
             self.show_defect()
@@ -1386,24 +1399,18 @@ class TunnelSelector:
             return
         if not self.option_usable(self.active, li):
             return
-        newly_chosen = not h.get("chosen")
-        h["chosen"] = True
         if h["sel"] != li:
             h["sel"] = li
-            self.via = "manual"
+            self._clear_confirmation(self.active)
             self.redraw()
             self.export()
             self._changed()
-        elif newly_chosen:
-            self._changed()      # the recommended-fix button may now be enabled
 
     def toggle_active_loop(self):
         """Switch to the other option of the active defect (Space key)."""
         h = self.handles[self.active]
         if len(h["loops"]) > 1:
             self.select_option((h["sel"] + 1) % len(h["loops"]))   # no-op if unusable
-        else:
-            self.select_option(h["sel"])    # only one option: Space confirms it
 
     def advanced_rows(self):
         return advanced_rows(self.handles, self.pts)
@@ -1542,11 +1549,13 @@ class TunnelSelector:
         if best is None:
             return
         _, hi, li = best
-        if (self.mode == "choose" and not self.busy and self.option_usable(hi, li)
-                and self.handles[hi]["sel"] != li):
-            self.handles[hi]["sel"] = li
-            self.redraw()
-            self.export()
+        if self.mode != "choose" or self.busy:
+            return
+        # Same path as a card click, so a changed option clears that defect's
+        # confirmation (stage 6a invariant).
+        self.set_active(hi, zoom=False)
+        if self.active == hi:
+            self.select_option(li)
 
     # ------------------------------------------------------------------
     # Drawing
@@ -1813,6 +1822,7 @@ class TunnelSelector:
             for other in range(len(h["loops"])):
                 if other != li and self.option_usable(hi, other):
                     h["sel"] = other
+                    self._clear_confirmation(hi)
                     self.redraw()
                     self.export()
                     self._status(
@@ -1820,6 +1830,9 @@ class TunnelSelector:
                         f"({plain_failure(st[1])}), so the other one is selected.",
                         COLOR_PALE_YELLOW)
                     break
+            else:
+                # no usable alternative: a confirmation of an unusable option is meaningless
+                self._clear_confirmation(hi)
         if self.mode == "choose" and self.view == "after":
             self._apply_view()          # the selected option's preview may have just landed
         self._changed()
@@ -1873,50 +1886,24 @@ class TunnelSelector:
     def request_apply(self):
         """C key / Apply button. Computes the fix and shows it (nothing is
         written until Keep). Ignored while a cut or save is already running,
-        in the after-view, or when a chosen option failed its preview."""
+        in the after-view, when a chosen option failed its preview, or while any
+        defect is unconfirmed."""
         if self.busy or self.mode != "choose":
             return
         if self.faces is None or not self.mesh_path:
             self._status("The fix is unavailable (no mesh data).", COLOR_CUT_INACTIVE)
             return
         if not self.can_apply():
-            self._status("One of the chosen options isn't available (it failed "
-                         "a safety check), so there is nothing to apply.",
-                         COLOR_CUT_INACTIVE)
+            if not self.selected_usable():
+                self._status("One of the chosen options isn't available (it failed "
+                             "a safety check), so there is nothing to apply.",
+                             COLOR_CUT_INACTIVE)
+            else:
+                self._status("Confirm every defect first (%d of %d confirmed)."
+                             % (self.confirmed_count(), len(self.handles)),
+                             COLOR_CUT_INACTIVE)
             return
         self.apply_cut_and_patch()
-
-    def recommendation(self):
-        """(selection, reason) of recommended_selection for the current state."""
-        return recommended_selection(self.handles, self.option_usable)
-
-    def can_apply_recommended(self):
-        return (self.mode == "choose" and not self.busy
-                and self.recommendation()[0] is not None)
-
-    def apply_recommended(self):
-        """R key / "Apply recommended fix": select 'Fill the hole' for every
-        classified defect (explicitly chosen options for the others), then run the
-        normal Apply (same worker, checks and after-view; nothing is saved until
-        Keep). Refused with the reason when there is no safe recommendation."""
-        if self.busy or self.mode != "choose":
-            return
-        selection, reason = self.recommendation()
-        if selection is None:
-            self._status(reason, COLOR_CUT_INACTIVE)
-            return
-        if self.faces is None or not self.mesh_path:
-            self._status("The fix is unavailable (no mesh data).", COLOR_CUT_INACTIVE)
-            return
-        for h, li in zip(self.handles, selection):
-            h["sel"] = li
-        self.via = "recommended"
-        self.redraw()
-        self.export()
-        self._changed()
-        self.request_apply()
-        if self.mode == "choose" and not self.busy:
-            self.via = "manual"        # refused before it started
 
     def apply_cut_and_patch(self):
         """Compute the fix for the chosen option(s) and enter the after-view.
@@ -1931,8 +1918,8 @@ class TunnelSelector:
         here: Keep saves. The job runs through job_runner (a worker thread in
         the window); _finish_apply runs on the GUI thread. On failure the status
         names the failed check and the mesh is unchanged."""
-        if self.busy or self.mode != "choose":
-            return
+        if self.busy or self.mode != "choose" or not self.can_apply():
+            return       # safety: nothing is computed while a defect is unconfirmed
         if self.faces is None or not self.mesh_path:
             self._status("The fix is unavailable (no mesh data).", COLOR_CUT_INACTIVE)
             return
@@ -1986,7 +1973,6 @@ class TunnelSelector:
         """GUI-thread tail of apply_cut_and_patch (error is None on success)."""
         if error is not None:
             self._set_busy(False)
-            self.via = "manual"       # a failed recommended fix must not label the next one
             self._status(
                 f"The fix was NOT applied; your mesh is unchanged.\n{error}\n"
                 "Use 'Export Loops for Blender' to make this cut manually instead.",
@@ -2042,12 +2028,12 @@ class TunnelSelector:
                 "other_linking": (None if o is None or o >= len(h["linking"])
                                   else _lk(h["linking"][o])),
                 "was_default": s == 0,
+                "confirmed": bool(h["confirmed"]),
             })
         ev = {
             "event": kind,
             "time": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "mesh": os.path.basename(self.mesh_path or ""),
-            "via": self.via,
             "genus_before": None if self.genus is None else int(self.genus),
             "face_count_before": None if self.faces is None else int(len(self.faces)),
             "defects": defects,
@@ -2073,7 +2059,6 @@ class TunnelSelector:
         if self.busy or self.mode != "after":
             return
         self._record_history("undone")
-        self.via = "manual"
         self.result = None
         self.result_mask = None
         self.result_genus = None
@@ -2759,20 +2744,6 @@ def _build_qt_classes():
                 "color: #aaa; font-size: 11px; background: transparent;")
             dl.addWidget(self._lbl_rule)
 
-            self._btn_recommend = QtWidgets.QPushButton(RECOMMEND_LABEL)
-            self._btn_recommend.setToolTip(RECOMMEND_TOOLTIP)
-            self._btn_recommend.setStyleSheet(
-                "QPushButton { background-color: #1f8f5c; font-weight: bold; "
-                "padding: 8px; } QPushButton:disabled { background-color: #444; "
-                "color: #888; }")
-            self._btn_recommend.clicked.connect(self._request_recommended)
-            dl.addWidget(self._btn_recommend)
-            self._lbl_recommend = QtWidgets.QLabel(RECOMMEND_CAPTION)
-            self._lbl_recommend.setWordWrap(True)
-            self._lbl_recommend.setStyleSheet(
-                "color: #aaa; font-size: 11px; background: transparent;")
-            dl.addWidget(self._lbl_recommend)
-
             nav = QtWidgets.QHBoxLayout()
             self._btn_prev = QtWidgets.QPushButton("< Prev")
             self._lbl_defect = QtWidgets.QLabel("Defect 1 of 1")
@@ -2923,7 +2894,7 @@ def _build_qt_classes():
             # turns Space (option toggle) into a click on that button, and Apply
             # has no other guard. Clicks still work; keys go to the filter.
             for _b in (self._btn_cut, self._btn_zoom, self._btn_whole, self._btn_see,
-                       self._btn_recommend, self._btn_adv, self._btn_export, self._btn_close, self._btn_prev,
+                       self._btn_adv, self._btn_export, self._btn_close, self._btn_prev,
                        self._btn_next, self._btn_view, self._btn_keep,
                        self._btn_undo, *self._cards):
                 _b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
@@ -3015,8 +2986,8 @@ def _build_qt_classes():
                 Qt = QtCore.Qt
                 camera_keys = (Qt.Key.Key_Z, Qt.Key.Key_H, Qt.Key.Key_X, Qt.Key.Key_P)
                 handled = (Qt.Key.Key_Space, Qt.Key.Key_Tab, Qt.Key.Key_Backtab,
-                           Qt.Key.Key_C, Qt.Key.Key_Escape, Qt.Key.Key_R) + camera_keys
-                plain_keys = camera_keys + (Qt.Key.Key_R,)
+                           Qt.Key.Key_C, Qt.Key.Key_Escape, Qt.Key.Key_F) + camera_keys
+                plain_keys = camera_keys + (Qt.Key.Key_F,)
                 if key in plain_keys and event.modifiers() != Qt.KeyboardModifier.NoModifier:
                     return super().eventFilter(obj, event)
                 sel = self._selector
@@ -3051,8 +3022,8 @@ def _build_qt_classes():
                         sel.prev_handle()
                     elif key == Qt.Key.Key_C:
                         self._request_cut()
-                    elif key == Qt.Key.Key_R:
-                        self._request_recommended()
+                    elif key == Qt.Key.Key_F:
+                        sel.confirm_active()
                     elif key == Qt.Key.Key_P:
                         self._toggle_view()
                     elif key == Qt.Key.Key_Z:
@@ -3107,14 +3078,6 @@ def _build_qt_classes():
             self._after.setVisible(after)
             self._btn_cut.setVisible(not after)
             self._adv_box.setVisible(not after)
-            rec, rec_reason = sel.recommendation()
-            self._btn_recommend.setEnabled(not locked and not after and rec is not None)
-            self._btn_recommend.setText(recommended_label(n))
-            self._lbl_recommend.setText(recommended_caption(sel.handles) if rec is not None
-                                        else rec_reason)
-            self._lbl_recommend.setStyleSheet(
-                "color: %s; font-size: 11px; background: transparent;"
-                % ("#aaa" if rec is not None else "#e6c36f"))
             self._lbl_adv.setText("\n".join(sel.advanced_rows()))
             self._lbl_adv.setVisible(True)
             self._lbl_defect.setText(sel.defect_title())
@@ -3168,11 +3131,6 @@ def _build_qt_classes():
                 f"color: {color}; font-size: 11px; background: transparent;")
 
         # --- apply / keep / undo ------------------------------------------
-        def _request_recommended(self, *_):
-            if self._selector is None or self._selector.busy or self._prompt_open:
-                return
-            self._selector.apply_recommended()
-
         def _toggle_advanced(self, *_):
             self._adv_open = not self._adv_open
             self._sync_advanced()

@@ -12,7 +12,7 @@ import pyvista as pv
 
 import mesh_problem_viewer as mpv
 from tunnel_loop_locator import select_cut_loop
-from test_tunnel_safety import _torus, SCALE
+from test_tunnel_safety import _torus, SCALE, confirm_all
 
 
 def _poly_arrays(poly):
@@ -272,6 +272,7 @@ def test_after_view_colours_the_new_surface_and_shows_the_legend(torus_pair, tmp
     sel, pl = _selector(torus_pair, previews=True)
     # enable Apply; Undo appends to cutpatch_history.json beside the mesh, so keep it in tmp
     sel.mesh_path = str(tmp_path / "dummy.ply")
+    confirm_all(sel)
     sel.request_apply()                                  # inline job runner
     assert sel.mode == "after" and sel.result_mask is not None
     assert sel.new_surface_legend() == mpv.GREEN_LEGEND

@@ -5,7 +5,6 @@ import numpy as np
 
 import mesh_problem_viewer as mpv
 from test_tunnel_stage3 import make_selector, torus, pair  # noqa: F401 (fixtures)
-from test_tunnel_recommended import _h
 
 
 def _square_loop(side, n=8):
@@ -39,14 +38,15 @@ def test_warning_joins_preview_status():
     assert cards[0]["preview_state"] == "warn"
 
 
-def test_recommended_excludes_defect_with_long_ring():
-    ok = _h(["TUNNEL", "HANDLE"])
-    long_ = _h(["TUNNEL", "HANDLE"])
-    long_["long"] = [False, True]
-    assert mpv.recommended_selection([ok])[0] == [0]
-    sel, reason = mpv.recommended_selection([ok, long_])
-    assert sel is None
-    assert "Defect 2" in reason and "unusually long" in reason
+def test_long_ring_defect_can_still_be_confirmed(tmp_path, torus, pair):
+    """A long ring only warns (no recommendation path exists any more): the user
+    confirms it like any other defect."""
+    with mock.patch.object(mpv, "long_ring_flags", lambda *a, **k: [True, False]):
+        sel, _ = make_selector(tmp_path, torus, pair, runner=False, previews=False,
+                               long_guard=True)
+    assert not sel.can_apply()
+    sel.confirm_active()
+    assert sel.can_apply()
 
 
 def test_selector_flags_long_rings(tmp_path, torus, pair):
@@ -55,8 +55,6 @@ def test_selector_flags_long_rings(tmp_path, torus, pair):
                                long_guard=True)
     assert sel.handles[0]["long"] == [True, False]
     assert sel.cards()[0]["warning"] == mpv.LONG_RING_WARNING
-    assert sel.recommendation()[0] is None
-    assert not sel.can_apply_recommended()
 
 
 def test_selector_flags_match_loop_lengths(tmp_path, torus, pair):

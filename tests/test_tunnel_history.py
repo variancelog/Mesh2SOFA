@@ -7,7 +7,7 @@ import pytest
 
 import mesh_problem_viewer as mpv
 import project_store as ps
-from test_tunnel_stage3 import make_selector, torus, pair  # noqa: F401 (fixtures)
+from test_tunnel_stage3 import make_selector, torus, pair, confirm_all  # noqa: F401 (fixtures)
 
 
 def _events(d):
@@ -60,10 +60,12 @@ def test_history_survives_reset_mesh_artifacts(tmp_path):
 # --- viewer -------------------------------------------------------------------
 def test_keep_records_event_and_undo_records_event(tmp_path, torus, pair):  # noqa: F811
     sel, mesh = make_selector(tmp_path, torus, pair, runner=False, previews=False)
+    confirm_all(sel)
     sel.request_apply()
     assert sel.mode == "after"
     sel.undo()
     sel.select_option(1)
+    confirm_all(sel)
     sel.request_apply()
     sel.keep()
     ev = _events(tmp_path)
@@ -72,12 +74,13 @@ def test_keep_records_event_and_undo_records_event(tmp_path, torus, pair):  # no
     assert "genus_after" not in und and "face_count_after" not in und
     assert kept["genus_before"] == 1 and kept["genus_after"] == 0
     assert kept["face_count_before"] == len(torus[1]) and kept["face_count_after"] > 0
-    assert kept["mesh"] == "aligned_head.ply" and kept["via"] == "manual"
+    assert kept["mesh"] == "aligned_head.ply"
     assert kept["time"] and und["time"]
     d = kept["defects"][0]
     assert d["chosen"] in ("TUNNEL", "HANDLE", "UNKNOWN") and d["other"] in (
         "TUNNEL", "HANDLE", "UNKNOWN")
     assert d["chosen_length_mm"] > 0 and d["other_length_mm"] > 0
+    assert d["confirmed"] is True and und["defects"][0]["confirmed"] is True
     assert d["was_default"] is False and und["defects"][0]["was_default"] is True
     assert d["chosen_linking"] == pair["linking"]["avoid"] or d["chosen_linking"] is None \
         or len(d["chosen_linking"]) == 2
@@ -85,12 +88,13 @@ def test_keep_records_event_and_undo_records_event(tmp_path, torus, pair):  # no
     assert os.path.exists(os.path.join(str(tmp_path), "cutpatch_report.json"))
 
 
-def test_via_field_is_passed_through(tmp_path, torus, pair):  # noqa: F811
+def test_history_has_no_via_or_recommended_field(tmp_path, torus, pair):  # noqa: F811
     sel, mesh = make_selector(tmp_path, torus, pair, runner=False, previews=False)
-    sel.via = "recommended"
+    confirm_all(sel)
     sel.request_apply()
     sel.keep()
-    assert _events(tmp_path)[0]["via"] == "recommended"
+    ev = _events(tmp_path)[0]
+    assert "via" not in ev and "recommended" not in json.dumps(ev)
 
 
 def test_history_failure_never_blocks_keep_or_undo(tmp_path, torus, pair, monkeypatch):  # noqa: F811
@@ -98,9 +102,11 @@ def test_history_failure_never_blocks_keep_or_undo(tmp_path, torus, pair, monkey
         raise OSError("disk full")
     monkeypatch.setattr(ps, "append_cutpatch_history", boom)
     sel, mesh = make_selector(tmp_path, torus, pair, runner=False, previews=False)
+    confirm_all(sel)
     sel.request_apply()
     sel.undo()
     assert sel.mode == "choose"
+    confirm_all(sel)
     sel.request_apply()
     sel.keep()
     assert sel.kept is True and os.path.exists(ps.backup_path_for(mesh))
@@ -109,6 +115,7 @@ def test_history_failure_never_blocks_keep_or_undo(tmp_path, torus, pair, monkey
 
 def test_failed_save_records_nothing(tmp_path, torus, pair, monkeypatch):  # noqa: F811
     sel, mesh = make_selector(tmp_path, torus, pair, runner=False, previews=False)
+    confirm_all(sel)
     sel.request_apply()
     monkeypatch.setattr(mpv, "_write_ply_tmp",
                         mock.Mock(side_effect=OSError("write failed")))

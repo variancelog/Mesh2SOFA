@@ -19,7 +19,7 @@ import project_store as ps
 import tunnel_loop_extractor as tle
 from tunnel_loop_extractor import mesh_genus
 from tunnel_loop_locator import select_cut_loop, locate_cut_loops
-from test_tunnel_safety import _torus, _double_torus
+from test_tunnel_safety import _torus, _double_torus, confirm_all
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +219,7 @@ def test_unavailable_option_is_greyed_unselectable_and_switched_away_from(
     assert sel.handles[0]["sel"] == 0
     sel.toggle_active_loop()                               # Space: refused too
     assert sel.handles[0]["sel"] == 0
-    assert sel.can_apply()
+    assert sel.selected_usable()
 
 
 def test_selected_option_failing_moves_selection_and_all_failed_blocks_apply(
@@ -237,6 +237,7 @@ def test_selected_option_failing_moves_selection_and_all_failed_blocks_apply(
     sel.previews._entries[(0, 1)].update(state="failed", reason="test")
     assert not sel.can_apply()
     before = open(mesh, "rb").read()
+    confirm_all(sel)
     sel.request_apply()
     assert sel.mode == "choose" and open(mesh, "rb").read() == before
     assert any("Defect 1 can't be fixed inside the app" in n for n in sel.notes())
@@ -259,6 +260,7 @@ def test_single_defect_apply_reuses_cached_preview_and_saves_exactly_it(
         n = len(calls)
         sel2.select_option(li)
         preview = sel2.previews.result((0, li))
+        confirm_all(sel2)
         sel2.request_apply()
         assert len(calls) == n, "Apply must not recompute a ready preview"
         assert sel2.mode == "after" and sel2.result[0] is preview[0] \
@@ -278,6 +280,7 @@ def test_apply_before_preview_ready_computes_once_and_fills_the_cache(
         tmp_path, torus, pair, monkeypatch):
     calls = spy_cut_and_patch(monkeypatch)
     sel, mesh = make_selector(tmp_path, torus, pair)      # previews never started
+    confirm_all(sel)
     sel.request_apply()
     assert sel.mode == "after" and len(calls) == 1
     assert sel.previews.state((0, 0))[0] == "ready"
@@ -288,6 +291,7 @@ def test_apply_before_preview_ready_computes_once_and_fills_the_cache(
 def test_undo_restarts_stopped_previews(tmp_path, torus, pair, monkeypatch):
     calls = spy_cut_and_patch(monkeypatch)
     sel, mesh = make_selector(tmp_path, torus, pair)
+    confirm_all(sel)
     sel.request_apply()                                   # computes (0,0), stops the rest
     assert sel.previews.pending_keys() == [(0, 1)]
     sel.undo()                                            # back to choosing: previews resume
@@ -301,11 +305,13 @@ def test_apply_failure_marks_option_unavailable_and_changes_nothing(
                       fail_for=lambda lp: np.array_equal(np.asarray(lp), cut))
     sel, mesh = make_selector(tmp_path, torus, pair)
     before = open(mesh, "rb").read()
+    confirm_all(sel)
     sel.request_apply()
     assert sel.mode == "choose" and not sel.busy
     assert open(mesh, "rb").read() == before
     assert sel.previews.state((0, 0))[0] == "failed"
-    assert sel.handles[0]["sel"] == 1 and sel.can_apply()
+    assert sel.handles[0]["sel"] == 1 and sel.selected_usable()
+    assert not sel.handles[0]["confirmed"]       # the selection moved: confirm again
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +335,7 @@ def test_multi_defect_apply_runs_cut_and_patch_loops(tmp_path, dtorus_pairs, mon
     assert all(mesh_genus(*sel.previews.result(k)) == 1 for k in sel.previews.keys()), \
         "a single-loop preview of a genus-2 mesh still has one defect left"
     before = open(mesh, "rb").read()
+    confirm_all(sel)
     sel.request_apply()
     assert seen == [2], "combined cut_and_patch_loops, not a cached single preview"
     assert sel.mode == "after" and sel.result_genus == 0
@@ -389,6 +396,7 @@ def test_after_view_p_compares_fix_with_original_and_undo_restores_rings(
     _write_ply(mesh, pts, faces)
     pl = _actor_pl()
     sel = mpv.TunnelSelector(pl, pts, [pair], mesh_path=mesh, faces=faces, previews=True)
+    confirm_all(sel)
     sel.request_apply()
     assert sel.mode == "after" and sel.view == "after" and sel.can_toggle_view()
     pl.actors["sel_loop_0_0"].SetVisibility.assert_called_with(False)
@@ -405,10 +413,12 @@ def test_after_view_p_compares_fix_with_original_and_undo_restores_rings(
 def test_unkept_result_is_what_close_asks_about(tmp_path, torus, pair):
     sel, mesh = make_selector(tmp_path, torus, pair, runner=False)
     assert not sel.has_unkept_result()
+    confirm_all(sel)
     sel.request_apply()
     assert sel.has_unkept_result()
     sel.undo()
     assert not sel.has_unkept_result()
+    confirm_all(sel)
     sel.request_apply()
     sel.keep()
     assert not sel.has_unkept_result(), "a kept fix never asks about discarding"
@@ -419,10 +429,12 @@ def test_keep_and_undo_ignored_while_a_worker_runs(tmp_path, torus, pair):
     sel, mesh = make_selector(tmp_path, torus, pair, runner=False,
                               job_runner=lambda job, finish: queued.update(job=job,
                                                                            finish=finish))
+    confirm_all(sel)
     sel.request_apply()
     assert sel.busy
     sel.keep()
     sel.undo()
+    confirm_all(sel)
     sel.request_apply()
     assert sel.mode == "choose" and queued["job"] is not None
     queued["job"]()
@@ -455,9 +467,10 @@ def test_previews_disabled_flag_gives_stage2_behaviour_plus_after_view(
     sel.start_previews()
     assert started == []
     assert all(c["status"] is None and c["enabled"] for c in sel.cards())
-    assert sel.can_apply() and not sel.can_toggle_view()
+    assert sel.selected_usable() and not sel.can_toggle_view()
     sel.toggle_view()
     assert sel.view == "before"
+    confirm_all(sel)
     sel.request_apply()
     assert sel.mode == "after" and len(calls) == 1
     sel.keep()

@@ -40,6 +40,13 @@ SCALE = 10.0   # make the synthetic parts head-sized (mm) so the 1.5 mm cap reme
 # ---------------------------------------------------------------------------
 # Synthetic fixtures
 # ---------------------------------------------------------------------------
+def confirm_all(sel):
+    """Test helper: mark every defect of a TunnelSelector as confirmed (Apply
+    needs the user's confirmation of each defect since stage 6a)."""
+    for h in sel.handles:
+        h["confirmed"] = True
+
+
 def _torus():
     t = pv.ParametricTorus(ringradius=3.0, crosssectionradius=1.0,
                            u_res=48, v_res=24).triangulate().clean()
@@ -512,6 +519,7 @@ def test_viewer_apply_shows_result_but_writes_nothing(viewer_setup):
     byte-identical and no backup / temp / sentinel exists until Keep."""
     sel, mesh, events, tmp_path = viewer_setup
     before = open(mesh, "rb").read()
+    confirm_all(sel)
     sel.request_apply()                          # C / Apply: no confirm step any more
     assert sel.mode == "after" and sel.result is not None and not sel.busy
     assert sel.result_genus == 0
@@ -523,6 +531,7 @@ def test_viewer_apply_shows_result_but_writes_nothing(viewer_setup):
 def test_viewer_undo_leaves_file_byte_identical(viewer_setup):
     sel, mesh, events, tmp_path = viewer_setup
     before = open(mesh, "rb").read()
+    confirm_all(sel)
     sel.request_apply()
     sel.undo()
     assert sel.mode == "choose" and sel.result is None
@@ -530,6 +539,7 @@ def test_viewer_undo_leaves_file_byte_identical(viewer_setup):
     assert _files(tmp_path) == {"aligned_head.ply"}
     assert events["success"] == 0
     assert (tmp_path / "cutpatch_history.json").exists(), "the undo is recorded"
+    confirm_all(sel)
     sel.request_apply()                          # and it can be applied again
     assert sel.mode == "after"
 
@@ -537,6 +547,7 @@ def test_viewer_undo_leaves_file_byte_identical(viewer_setup):
 def test_viewer_keep_writes_backup_and_result(viewer_setup):
     sel, mesh, events, tmp_path = viewer_setup
     before = open(mesh, "rb").read()
+    confirm_all(sel)
     sel.request_apply()
     sel.keep()
     backup = ps.backup_path_for(mesh)
@@ -549,6 +560,7 @@ def test_viewer_keep_writes_backup_and_result(viewer_setup):
     assert os.path.exists(tmp_path / "cutpatch_report.json")
     assert events["success"] == 1 and sel.kept
     assert sel.busy, "stays busy after success so a queued 2nd press cannot re-cut"
+    confirm_all(sel)
     sel.request_apply()                           # ignored while busy
     sel.keep()
     assert events["success"] == 1
@@ -567,6 +579,7 @@ def test_viewer_failed_check_leaves_original_and_no_backup(viewer_setup):
     before = open(mesh, "rb").read()
     # force a failing cut: a loop that does not sever
     sel.handles[0]["loops"][0] = np.asarray(sel.faces[0], dtype=np.int64)
+    confirm_all(sel)
     sel.apply_cut_and_patch()
     assert open(mesh, "rb").read() == before
     assert _files(tmp_path) == {"aligned_head.ply"}, "no tmp, no backup, no sentinel"
@@ -581,6 +594,7 @@ def test_viewer_failed_keep_leaves_original_and_stays_in_after_view(viewer_setup
                                                                     monkeypatch):
     sel, mesh, events, tmp_path = viewer_setup
     before = open(mesh, "rb").read()
+    confirm_all(sel)
     sel.request_apply()
     real_replace = os.replace
 
@@ -602,7 +616,9 @@ def test_viewer_failed_keep_leaves_original_and_stays_in_after_view(viewer_setup
 def test_viewer_ignores_second_apply_while_busy(viewer_setup):
     sel, mesh, events, tmp_path = viewer_setup
     sel.busy = True
+    confirm_all(sel)
     sel.request_apply()
+    confirm_all(sel)
     sel.apply_cut_and_patch()
     assert sel.mode == "choose" and events["busy"] == []
     assert _files(tmp_path) == {"aligned_head.ply"}
