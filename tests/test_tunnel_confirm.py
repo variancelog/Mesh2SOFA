@@ -9,8 +9,7 @@ import pytest
 import mesh_problem_viewer as mpv
 import project_store as ps
 import tunnel_loop_extractor as tle
-from test_tunnel_stage3 import (make_selector, torus, pair, dtorus_pairs,  # noqa: F401 (fixtures)
-                                _write_ply)
+from _mesh_helpers import make_selector, _write_ply
 
 
 def _sel(tmp_path, torus, pair, **kw):  # noqa: F811
@@ -235,19 +234,6 @@ def test_history_event_reflects_unconfirmed_state(tmp_path, torus, pair):  # noq
     assert sel.history_event("undone")["defects"][0]["confirmed"] is False
 
 
-# --- pure helpers ----------------------------------------------------------------
-def test_confirm_label():
-    assert mpv.confirm_label(False) == "Confirm this fix  [F]"
-    assert mpv.confirm_label(True) == "Confirmed"
-
-
-@pytest.mark.parametrize("n,text", [
-    (0, "Apply selected fix  [C]"), (1, "Apply selected fix  [C]"),
-    (2, "Apply all selected fixes  [C]"), (5, "Apply all selected fixes  [C]")])
-def test_apply_label(n, text):
-    assert mpv.apply_label(n) == text
-
-
 @pytest.mark.parametrize("k,n,text", [
     (0, 1, "Confirm 1 more defect to enable."),
     (1, 2, "Confirm 1 more defect to enable."),
@@ -292,18 +278,6 @@ def test_advanced_rows_have_technical_details():
     assert "TUNNEL" in rows[0] and "mm" in rows[0] and "linking" in rows[0]
     assert "<- selected" in rows[0] and "<- selected" not in rows[1]
     assert "not available" in rows[2] and "does not cut" in rows[2]
-
-
-def test_tight_note_points_at_advanced():
-    assert "Advanced" in mpv.TIGHT_MODE_NOTE and "Blender" in mpv.TIGHT_MODE_NOTE
-
-
-def test_no_recommendation_api_left():
-    for name in ("recommended_selection", "recommended_label", "recommended_caption",
-                 "RECOMMEND_LABEL", "RECOMMEND_CAPTION"):
-        assert not hasattr(mpv, name)
-    for name in ("recommendation", "can_apply_recommended", "apply_recommended"):
-        assert not hasattr(mpv.TunnelSelector, name)
 
 
 # --- 6b: after-view choice lines ---------------------------------------------

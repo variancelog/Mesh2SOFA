@@ -19,66 +19,14 @@ import project_store as ps
 import tunnel_loop_extractor as tle
 from tunnel_loop_extractor import mesh_genus
 from tunnel_loop_locator import select_cut_loop, locate_cut_loops
-from test_tunnel_safety import _torus, _double_torus, confirm_all
+from _mesh_helpers import confirm_all, make_selector, _write_ply, _inline_runner  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
 # fixtures / helpers
 # ---------------------------------------------------------------------------
-@pytest.fixture(scope="module")
-def torus():
-    return _torus()
-
-
-@pytest.fixture(scope="module")
-def pair(torus):
-    pts, faces = torus
-    p = select_cut_loop(pts, faces, 1)[0]
-    assert p.get("avoid") is not None, "fixture needs both options of the defect"
-    return p
-
-
-@pytest.fixture(scope="module")
-def dtorus_pairs():
-    pts, faces = _double_torus()
-    loops = locate_cut_loops(pts, faces, 2)
-    assert len(loops) == 2
-    return pts, faces, [{"cut": lp, "avoid": None} for lp in loops]
-
-
-def _write_ply(path, pts, faces):
-    cells = np.hstack([np.full((len(faces), 1), 3, dtype=np.int64), faces]).ravel()
-    pv.PolyData(pts, cells).save(path)
-
-
-def _inline_runner(sel):
-    """preview_runner that runs the whole preview loop inline (what the window's
-    QThread does, minus the thread)."""
-    def runner(run_fn):
-        run_fn(sel.on_preview_update)
-    return runner
-
-
-def make_selector(tmp_path, torus, pair, runner=True, long_guard=False, **kw):
-    """long_guard=False switches the stage-5d long-ring warning off: the synthetic
-    torus has rings longer than 25 % of its tiny bbox, which is not what the
-    other tests are about (tests/test_tunnel_longring.py covers the guard)."""
-    pts, faces = torus
-    mesh = str(tmp_path / "aligned_head.ply")
-    _write_ply(mesh, pts, faces)
-    holder = {}
-    kw.setdefault("previews", True)
-    guard = (mock.patch.object(mpv, "long_ring_flags",
-                               lambda _p, loops, _d, *a, **k: [False] * len(loops))
-             if not long_guard else mock.patch.object(mpv, "PREVIEWS_ENABLED",
-                                                      mpv.PREVIEWS_ENABLED))
-    with guard:
-        sel = mpv.TunnelSelector(
-            mock.MagicMock(), pts, [pair], mesh_path=mesh, faces=faces, genus=1,
-            preview_runner=(lambda fn: _inline_runner(holder["sel"])(fn)) if runner else None,
-            **kw)
-    holder["sel"] = sel
-    return sel, mesh
+# torus / pair / dtorus_pairs are session fixtures in conftest.py; make_selector and
+# _write_ply live in _mesh_helpers.py.
 
 
 def spy_cut_and_patch(monkeypatch, fail_for=None):
@@ -96,15 +44,6 @@ def spy_cut_and_patch(monkeypatch, fail_for=None):
     return calls
 
 
-# ---------------------------------------------------------------------------
-# text
-# ---------------------------------------------------------------------------
-def test_banner_text():
-    assert mpv.fixed_banner(0) == "Fixed — 0 defects left"
-    assert mpv.fixed_banner(1) == "Fixed — 1 defect left"
-    assert mpv.fixed_banner(3) == "Fixed — 3 defects left"
-
-
 def test_stage3_visible_text_has_no_jargon():
     texts = [mpv.PREVIEW_PENDING_TEXT, mpv.PREVIEW_READY_TEXT,
              mpv.PREVIEW_UNAVAILABLE_PREFIX, mpv.KEEP_LABEL, mpv.UNDO_LABEL,
@@ -120,12 +59,7 @@ def test_stage3_visible_text_has_no_jargon():
     for t in texts:
         assert not re.search(r"\b(tunnel|handle|genus|linking|loop|cut_and_patch)\b", t,
                              re.I), t
-    assert mpv.KEEP_LABEL == "Keep & Close" and "backup" in mpv.KEEP_TOOLTIP
-    assert "aligned_head.ply" in mpv.KEEP_TOOLTIP
     assert mpv.preview_status_text("running") == mpv.PREVIEW_PENDING_TEXT
-    assert mpv.preview_status_text("ready") == "Preview ready"
-    assert mpv.preview_status_text("failed", "x: capped genus 1 != 0").startswith(
-        "Not available — ")
 
 
 def test_close_decision_table():
@@ -486,6 +420,7 @@ def test_no_preview_runner_means_no_previews_by_default(torus, pair):
 # ---------------------------------------------------------------------------
 # background previews in a child process (keeps the GUI off the GIL-holding native calls)
 # ---------------------------------------------------------------------------
+@pytest.mark.slow
 def test_process_mode_previews_match_in_process_result_and_forward_failures(torus, pair):
     pts, faces = torus
     bad = np.asarray(faces[0], dtype=np.int64)
@@ -505,6 +440,7 @@ def test_process_mode_previews_match_in_process_result_and_forward_failures(toru
         cache.shutdown()
 
 
+@pytest.mark.slow
 def test_shutdown_cancels_the_child_and_leaves_the_option_pending(torus, pair):
     pts, faces = torus
     cache = mpv.PreviewCache(pts, faces, {(0, 0): pair["cut"], (0, 1): pair["avoid"]},

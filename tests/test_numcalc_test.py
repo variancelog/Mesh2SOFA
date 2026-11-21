@@ -126,6 +126,22 @@ def test_read_test_index_no_frequencies(tmp_path):
         rnt.read_test_index(str(tmp_path))
 
 
+def test_test_index_falls_back_to_frequencies_length(tmp_path):
+    freqs = [150 * i for i in range(1, 121)]
+    (tmp_path / "parameters.json").write_text(json.dumps({"frequencies": freqs}))
+    assert rnt.read_test_index(str(tmp_path)) == (120, 18000)
+
+
+def test_missing_parameters_json_fails(tmp_path, capsys):
+    assert rnt.run_test(str(tmp_path), "NumCalc.exe") is False
+    assert "parameters.json" in capsys.readouterr().out
+
+
+def test_unreadable_parameters_json_fails(tmp_path):
+    (tmp_path / "parameters.json").write_text("{not json")
+    assert rnt.run_test(str(tmp_path), "NumCalc.exe") is False
+
+
 # --------------------------------------------------------------------------
 # orchestrator with a fake NumCalc
 # --------------------------------------------------------------------------
@@ -225,20 +241,24 @@ def test_one_ear_fails(exports):
     assert any(l.startswith("[R] FAIL") and "rc=3" in l for l in lines)
 
 
-def test_stale_log_is_ignored(exports):
+@pytest.mark.parametrize("mtime", [(1_000_000, 1_000_000), None],
+                         ids=["stale_log_is_ignored", "fresh_stale_log_is_ignored"])
+def test_stale_log_is_ignored(exports, mtime):
     """A complete NC log from an earlier run must not be reported as progress
-    while the new NumCalc has not written its log yet."""
+    while the new NumCalc has not written its log yet. mtime=None is the
+    just-written case (#3): a complete log < 1 s before launch is still stale."""
     fake, projects = exports
     stale = os.path.join(projects[0], "NumCalc", "source_1", "NC120-120.out")
     with open(stale, "w") as fh:
         fh.write("".join(CHUNKS))
-    os.utime(stale, (1_000_000, 1_000_000))
+    if mtime is not None:
+        os.utime(stale, mtime)
     ears, lines = _run(projects[:1], _builder(fake, delay=0.05, prewait=0.6),
                        heartbeat_s=0.2)
     hb = [l for l in lines if "| elapsed" in l]
     assert hb and hb[0].startswith("[L] running (no log yet)")
-    first_phase = next(i for i, l in enumerate(lines) if "log complete" in l)
-    assert first_phase > lines.index(hb[0])
+    done = next(i for i, l in enumerate(lines) if "log complete" in l)
+    assert done > lines.index(hb[0])
     assert ears[0].passed
 
 
@@ -285,6 +305,7 @@ def _exe_wrapper(tmp_path, fake):
     return str(w)
 
 
+@pytest.mark.slow
 def test_cli_parallel_exit_code(exports, tmp_path, monkeypatch):
     fake, projects = exports
     exe = _exe_wrapper(tmp_path, fake)
@@ -318,6 +339,7 @@ def _cli(projects, exe, env_extra, timeout=60):
                           env=env, timeout=timeout)
 
 
+@pytest.mark.slow
 def test_cli_survives_undecodable_child_bytes(exports, tmp_path):
     """#1: odd bytes from NumCalc + 2 MB of output must not kill the pipe
     reader (which would block the child and hang the worker)."""
@@ -329,6 +351,7 @@ def test_cli_survives_undecodable_child_bytes(exports, tmp_path):
     assert "[L] weird" in out
 
 
+@pytest.mark.slow
 def test_cli_non_cp1252_project_path(tmp_path, monkeypatch):
     """#2: a Cyrillic project folder must not crash the cp1252 console."""
     root = tmp_path / "\u041f\u0440\u043e\u0435\u043a\u0442"
@@ -338,21 +361,6 @@ def test_cli_non_cp1252_project_path(tmp_path, monkeypatch):
     assert r.returncode == 0, out[-2000:]
     assert "[L] PASS" in out and "[R] PASS" in out
     assert "\\u041f" in out          # backslash-escaped, not a crash
-
-
-def test_fresh_stale_log_is_ignored(exports):
-    """#3: a complete log written just before launch is still stale."""
-    fake, projects = exports
-    stale = os.path.join(projects[0], "NumCalc", "source_1", "NC120-120.out")
-    with open(stale, "w") as fh:
-        fh.write("".join(CHUNKS))       # mtime = now, i.e. < 1 s before launch
-    ears, lines = _run(projects[:1], _builder(fake, delay=0.05, prewait=0.6),
-                       heartbeat_s=0.2)
-    hb = [l for l in lines if "| elapsed" in l]
-    assert hb and hb[0].startswith("[L] running (no log yet)")
-    done = next(i for i, l in enumerate(lines) if "log complete" in l)
-    assert done > lines.index(hb[0])
-    assert ears[0].passed
 
 
 @pytest.mark.parametrize("rc", [0, 1])

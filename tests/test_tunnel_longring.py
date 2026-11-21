@@ -4,7 +4,7 @@ from unittest import mock
 import numpy as np
 
 import mesh_problem_viewer as mpv
-from test_tunnel_stage3 import make_selector, torus, pair  # noqa: F401 (fixtures)
+from _mesh_helpers import make_selector
 
 
 def _square_loop(side, n=8):

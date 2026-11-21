@@ -5,61 +5,14 @@ The add-on imports bpy/bmesh at module level, so stub modules are injected into
 sys.modules before loading it by file path. Only the bpy-free functions are
 exercised here; the Blender side is checked by a headless export.
 """
-import importlib.util
 import math
 import os
-import sys
-import types
 
 import pytest
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_ADDON_PATH = os.path.join(_REPO_ROOT, "blender_scripts", "mesh2SOFA_blender_addon.py")
+from _mesh_helpers import load_addon
 
-
-def _load_addon():
-    bpy = types.ModuleType("bpy")
-
-    class _Base:
-        pass
-
-    bpy.types = types.SimpleNamespace(
-        Operator=type("Operator", (_Base,), {}),
-        Panel=type("Panel", (_Base,), {}),
-        Scene=type("Scene", (), {}),
-    )
-
-    def _prop(*args, **kwargs):
-        return ("prop", args, kwargs)
-
-    bpy.props = types.SimpleNamespace(
-        EnumProperty=_prop, BoolProperty=_prop, FloatProperty=_prop,
-        StringProperty=_prop, IntProperty=_prop)
-    bpy.utils = types.SimpleNamespace(
-        register_class=lambda cls: None, unregister_class=lambda cls: None)
-    bpy.app = types.SimpleNamespace(background=True)
-    bpy.path = types.SimpleNamespace(abspath=lambda p: "")
-    bmesh = types.ModuleType("bmesh")
-
-    saved = {k: sys.modules.get(k) for k in ("bpy", "bmesh")}
-    sys.modules["bpy"] = bpy
-    sys.modules["bmesh"] = bmesh
-    try:
-        spec = importlib.util.spec_from_file_location("m2s_addon_under_test", _ADDON_PATH)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        mod.register()  # exercises the property definitions against the stubs
-        mod.unregister()
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                sys.modules.pop(k, None)
-            else:
-                sys.modules[k] = v
-    return mod
-
-
-addon = _load_addon()
+addon = load_addon()
 
 
 # --- skin absorption (Fig. 1 check values) ----------------------------------
@@ -195,12 +148,6 @@ def test_m2h_default_material_conflicts(tmp_path):
     assert addon.m2h_default_material_conflicts(str(tmp_path))[0] == []
     (data / "Skin.csv").write_text("ADMI\n")
     assert addon.m2h_default_material_conflicts(str(tmp_path))[0] == ["Skin.csv"]
-
-
-def test_boundary_label():
-    assert addon.boundary_label('RIGID', None) == "rigid (legacy)"
-    assert addon.boundary_label('SKIN', None) == "skin absorption"
-    assert addon.boundary_label('SKIN', 11.0) == "skin absorption + hair (m=11)"
 
 
 # --- hair mask ----------------------------------------------------------------

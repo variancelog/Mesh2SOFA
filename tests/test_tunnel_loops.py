@@ -357,6 +357,7 @@ def test_dual_loop_none_on_genus0():
         assert g_after == 0
 
 
+@pytest.mark.slow
 def test_dual_loop_matches_ground_truth_cut():
     """DATA-DRIVEN (skips if the real scan is absent): on the genus-1 ear scan,
     the dual pair must contain the user's ground-truth manual cut, the pair
@@ -467,6 +468,7 @@ def test_select_cut_loop_labels_and_default():
         assert g_after == 0 and n_holes == 2 and n_comp == 1
 
 
+@pytest.mark.slow
 def test_classifier_on_zzmeshes_ground_truth():
     """DATA-DRIVEN (skips if zzmeshes/ absent): every ground-truth handle pair
     classifies definitively, and the genus_1 user loop is the HANDLE (pinned

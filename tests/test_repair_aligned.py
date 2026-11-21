@@ -9,16 +9,9 @@ import pyvista as pv
 
 import mesh_inspector as mi
 import project_store as ps
+from _mesh_helpers import torus_mesh
 
-SCALE = 10.0
-
-
-def _torus_faces():
-    t = pv.ParametricTorus(ringradius=3.0, crosssectionradius=1.0,
-                           u_res=48, v_res=24).triangulate().clean()
-    pts = np.asarray(t.points, dtype=np.float64) * SCALE
-    faces = t.faces.reshape(-1, 4)[:, 1:].astype(np.int64)
-    return pts, faces
+_torus_faces = torus_mesh
 
 
 def _save(path, pts, faces):

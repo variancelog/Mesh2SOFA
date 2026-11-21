@@ -6,7 +6,7 @@ import sys
 import pytest
 
 import app_settings as A
-from test_boundary_materials import _load_addon
+from _mesh_helpers import load_addon
 
 
 @pytest.fixture
@@ -141,7 +141,7 @@ def test_override_wins_everywhere(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("plat,kw,expected", CASES)
 def test_addon_mirror_matches_core(monkeypatch, plat, kw, expected):
-    addon = _load_addon()
+    addon = load_addon()
     _platform(monkeypatch, plat, _home, **kw)
     assert addon.user_settings_path() == A.user_settings_path()
     monkeypatch.setenv("MESH2SOFA_SETTINGS_DIR", _home)

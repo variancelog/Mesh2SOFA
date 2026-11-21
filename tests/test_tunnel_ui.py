@@ -16,19 +16,7 @@ import mesh_problem_viewer as mpv
 import project_store as ps
 from tunnel_loop_extractor import mesh_genus
 from tunnel_loop_locator import select_cut_loop
-from test_tunnel_safety import confirm_all
-
-
-# ---------------------------------------------------------------------------
-# Vocabulary
-# ---------------------------------------------------------------------------
-def test_label_mapping_uses_plain_names():
-    assert mpv.option_text("TUNNEL", 0) == ("Fill the hole",
-                                            "Plugs the see-through channel flush")
-    assert mpv.option_text("HANDLE", 1) == ("Remove the bridge",
-                                            "Cuts away the thin strand of material")
-    assert mpv.option_text("UNKNOWN", 0) == ("Option 1", "")
-    assert mpv.option_text(None, 1) == ("Option 2", "")
+from _mesh_helpers import confirm_all
 
 
 def test_technical_names_only_in_tooltips():
@@ -42,17 +30,11 @@ def test_technical_names_only_in_tooltips():
     assert "HANDLE" in mpv.OPTION_TOOLTIP["HANDLE"]
 
 
-def test_defect_title():
-    assert mpv.defect_title(0, 3) == "Defect 1 of 3"
-    assert mpv.defect_title(2, 3) == "Defect 3 of 3"
-
-
 # ---------------------------------------------------------------------------
 # Honest text: k of g, UNKNOWN, unavailable B
 # ---------------------------------------------------------------------------
 def test_remaining_defects_note():
-    assert (mpv.remaining_defects_note(2, 3)
-            == "Showing 2 of 3 defects. The rest will be found after these are fixed.")
+    assert mpv.remaining_defects_note(2, 3)      # only when some defects are not shown
     assert mpv.remaining_defects_note(3, 3) is None
     assert mpv.remaining_defects_note(1, None) is None
 
@@ -92,11 +74,6 @@ def test_notes_combine_unknown_and_k_of_g():
     assert notes[0] == mpv.UNKNOWN_WARNING
     assert notes[1].startswith("Showing 2 of 3 defects.")
     assert mpv.defect_notes(["TUNNEL", "HANDLE"], 3, 3) == []
-
-
-def test_tight_mode_note_explains_disabled_cut_and_blender():
-    assert "disabled" in mpv.TIGHT_MODE_NOTE
-    assert "Blender" in mpv.TIGHT_MODE_NOTE
 
 
 # ---------------------------------------------------------------------------
@@ -180,14 +157,6 @@ def test_camera_degenerate_direction_and_polar_view_up():
 # ---------------------------------------------------------------------------
 # TunnelSelector driven with a mock plotter
 # ---------------------------------------------------------------------------
-@pytest.fixture(scope="module")
-def torus():
-    t = pv.ParametricTorus(ringradius=3.0, crosssectionradius=1.0,
-                           u_res=48, v_res=24).triangulate().clean()
-    return (np.asarray(t.points, dtype=np.float64) * 10.0,
-            t.faces.reshape(-1, 4)[:, 1:].astype(np.int64))
-
-
 @pytest.fixture(scope="module")
 def torus_pair(torus):
     pts, faces = torus

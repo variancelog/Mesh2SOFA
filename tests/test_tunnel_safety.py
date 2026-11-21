@@ -34,82 +34,17 @@ from tunnel_loop_extractor import (
 )
 from tunnel_loop_locator import locate_cut_loops, select_cut_loop
 
-SCALE = 10.0   # make the synthetic parts head-sized (mm) so the 1.5 mm cap remesh is sane
+from _mesh_helpers import SCALE, confirm_all
 
 
 # ---------------------------------------------------------------------------
-# Synthetic fixtures
+# Synthetic meshes: torus / dtorus / torus_loop / dtorus_loops are the
+# session fixtures in conftest.py.
 # ---------------------------------------------------------------------------
-def confirm_all(sel):
-    """Test helper: mark every defect of a TunnelSelector as confirmed (Apply
-    needs the user's confirmation of each defect since stage 6a)."""
-    for h in sel.handles:
-        h["confirmed"] = True
-
-
-def _torus():
-    t = pv.ParametricTorus(ringradius=3.0, crosssectionradius=1.0,
-                           u_res=48, v_res=24).triangulate().clean()
-    pts = np.asarray(t.points, dtype=np.float64) * SCALE
-    faces = t.faces.reshape(-1, 4)[:, 1:].astype(np.int64)
-    return pts, faces
-
-
-def _double_torus(res=0.2, R=3.0, r=0.6):
-    """Two tori fused along their outer rims (implicit union, marching cubes):
-    one closed component, genus 2, holes ~R apart so each handle gets its own
-    loop."""
-    d = 2 * R - 0.9 * r
-    ax = np.arange(-(R + r + d / 2) - 0.5, (R + r + d / 2) + 0.5, res)
-    ay = np.arange(-(R + r) - 0.5, (R + r) + 0.5, res)
-    az = np.arange(-r - 0.5, r + 0.5, res)
-    X, Y, Z = np.meshgrid(ax, ay, az, indexing="ij")
-
-    def tor(cx):
-        return (np.sqrt((X - cx) ** 2 + Y ** 2) - R) ** 2 + Z ** 2 - r ** 2
-
-    F = np.minimum(tor(-d / 2), tor(d / 2))
-    g = pv.ImageData(dimensions=F.shape, spacing=(res, res, res),
-                     origin=(ax[0], ay[0], az[0]))
-    g.point_data["f"] = F.flatten(order="F")
-    m = g.contour([0.0], scalars="f").triangulate().clean()
-    return (np.asarray(m.points, dtype=np.float64) * SCALE,
-            m.faces.reshape(-1, 4)[:, 1:].astype(np.int64))
-
-
 def _sphere():
     s = pv.Icosphere(nsub=3, radius=1.0).triangulate().clean()
     return (np.asarray(s.points, dtype=np.float64) * 50.0,
             s.faces.reshape(-1, 4)[:, 1:].astype(np.int64))
-
-
-@pytest.fixture(scope="module")
-def torus():
-    return _torus()
-
-
-@pytest.fixture(scope="module")
-def torus_loop(torus):
-    pts, faces = torus
-    loops = locate_cut_loops(pts, faces, 1)
-    assert len(loops) == 1
-    return loops[0]
-
-
-@pytest.fixture(scope="module")
-def dtorus():
-    pts, faces = _double_torus()
-    assert mesh_genus(pts, faces) == 2
-    assert _topo_counts(faces)[3:] == (1, 0), "fixture must be 1 closed component"
-    return pts, faces
-
-
-@pytest.fixture(scope="module")
-def dtorus_loops(dtorus):
-    pts, faces = dtorus
-    loops = locate_cut_loops(pts, faces, 2)
-    assert len(loops) == 2, "fixture must give one severing loop per handle"
-    return loops
 
 
 def _watertight_one_component(faces):
@@ -493,12 +428,11 @@ def _write_torus_ply(path, pts, faces):
 
 
 @pytest.fixture
-def viewer_setup(tmp_path, torus):
+def viewer_setup(tmp_path, torus, pair):
     from mesh_problem_viewer import TunnelSelector
     pts, faces = torus
     mesh = str(tmp_path / "aligned_head.ply")
     _write_torus_ply(mesh, pts, faces)
-    pair = select_cut_loop(pts, faces, 1)[0]
     events = {"success": 0, "busy": []}
 
     sel = TunnelSelector(mock.MagicMock(), pts, [pair], mesh_path=mesh, faces=faces,
@@ -677,6 +611,7 @@ def test_restore_rejects_truncated_binary_ply_without_crashing(tmp_path, keep):
     assert not os.path.exists(ps.tmp_path_for(mesh))
 
 
+@pytest.mark.slow
 def test_restore_accepts_valid_binary_ply_in_child(tmp_path):
     original = _real_ply_bytes(tmp_path)
     mesh = _mesh_file(tmp_path, b"CURRENT-GOOD-MESH")
@@ -724,6 +659,7 @@ def test_restore_accepts_complete_ascii_ply(tmp_path):
     assert not os.path.exists(ps.backup_path_for(mesh))
 
 
+@pytest.mark.slow
 def test_read_check_child_counts_faces_against_the_declared_number(tmp_path):
     """The child process itself (second line of defence, after the header/row
     check) fails a partial read: exit 4 when the faces it got != the header's."""

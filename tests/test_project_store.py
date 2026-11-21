@@ -6,8 +6,7 @@ Tests for project_store.ProjectStore — the owner of the GUI<->worker JSON
 protocol. stdlib only (unittest + tempfile); no GUI / pymeshlab imports, so it
 runs anywhere.
 
-Run with:   python test_project_store.py
-or:         pytest test_project_store.py
+Run with:   python -m pytest tests/test_project_store.py
 """
 import json
 import os
@@ -23,44 +22,6 @@ from project_store import (
 def _write_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
-
-
-# --- reference implementations of the OLD inline rules, to lock the truth table ---
-def _old_aligned_check_passed(mesh_path):
-    """Reference rule: aligned check present and non-critical (the old GUI helper, since replaced by inspect_flow.step2_state)."""
-    p = os.path.join(mesh_path, "aligned_check.json")
-    if not os.path.exists(p):
-        return False
-    try:
-        with open(p) as f:
-            data = json.load(f)
-        return not any(v.get("severity") == "critical" for v in data.values())
-    except Exception:
-        return False
-
-
-def _old_mesh_check_passed(mesh_path):
-    """Verbatim logic of the old GUI _mesh_check_passed."""
-    p = os.path.join(mesh_path, "mesh_check.json")
-    if not os.path.exists(p):
-        return True
-    try:
-        with open(p) as f:
-            data = json.load(f)
-        return not any(v.get("severity") == "critical" for v in data.values())
-    except Exception:
-        return True
-
-
-def _old_find_project_json(start_path):
-    """Verbatim logic of the deleted process_and_grade.find_project_json."""
-    curr = start_path
-    for _ in range(3):
-        candidate = os.path.join(curr, "project.json")
-        if os.path.exists(candidate):
-            return candidate
-        curr = os.path.dirname(curr)
-    return None
 
 
 class MeshDirDerivation(unittest.TestCase):
@@ -122,38 +83,12 @@ class ReadCheckStates(unittest.TestCase):
             self.assertEqual(s.read_check(MESH_ALIGNED), CleanState.NOT_RUN)
             self.assertIsNone(s.read_check_data(MESH_ALIGNED))
 
-
-class AbsentPolicyTruthTable(unittest.TestCase):
-    """read_check==CLEAN must equal old _aligned_check_passed; read_check!=CRITICAL
-    must equal old _mesh_check_passed, across absent/clean/critical/corrupt."""
-
-    def _make(self, root, name, payload):
-        if payload is not None:
-            _write_json(os.path.join(root, name), payload)
-
-    CASES = {
-        "absent": None,
-        "clean": {"x": {"severity": "ok", "counts": {}}},
-        "critical": {"x": {"severity": "critical", "counts": {}}},
-    }
-
-    def test_aligned_matches_old(self):
-        for label, payload in self.CASES.items():
-            with tempfile.TemporaryDirectory() as root:
-                self._make(root, "aligned_check.json", payload)
-                store = ProjectStore(root, mesh_dir=root)
-                new = store.read_check(MESH_ALIGNED) == CleanState.CLEAN
-                self.assertEqual(new, _old_aligned_check_passed(root),
-                                 f"aligned mismatch on {label}")
-
-    def test_mesh_matches_old(self):
-        for label, payload in self.CASES.items():
-            with tempfile.TemporaryDirectory() as root:
-                self._make(root, "mesh_check.json", payload)
-                store = ProjectStore(root, mesh_dir=root)
-                new = store.read_check(MESH_GRADED) != CleanState.CRITICAL
-                self.assertEqual(new, _old_mesh_check_passed(root),
-                                 f"mesh mismatch on {label}")
+    def test_corrupt_graded_is_not_run(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "mesh_check.json"), "w") as f:
+                f.write("{not valid json")
+            self.assertEqual(self._store(root).read_check(MESH_GRADED),
+                             CleanState.NOT_RUN)
 
 
 class WriteRoundTripAndBytes(unittest.TestCase):
@@ -220,20 +155,17 @@ class Locate(unittest.TestCase):
             os.makedirs(deep)
             self.assertIsNone(ProjectStore.locate(deep))
 
-    def test_equals_old_find_project_json(self):
+    def test_finds_at_depth_zero(self):
         with tempfile.TemporaryDirectory() as root:
             _write_json(os.path.join(root, "project.json"), {"a": 1})
-            for depth in range(0, 5):
-                start = root
-                for i in range(depth):
-                    start = os.path.join(start, f"lvl{i}")
-                os.makedirs(start, exist_ok=True)
-                store = ProjectStore.locate(start)
-                old = _old_find_project_json(start)
-                if old is None:
-                    self.assertIsNone(store, f"depth {depth}")
-                else:
-                    self.assertEqual(store.project_json_path, old, f"depth {depth}")
+            self.assertEqual(ProjectStore.locate(root).project_root, root)
+
+    def test_none_at_depth_three_boundary(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write_json(os.path.join(root, "project.json"), {"a": 1})
+            deep = os.path.join(root, "a", "b", "c")
+            os.makedirs(deep)
+            self.assertIsNone(ProjectStore.locate(deep))
 
 
 class ForMeshDir(unittest.TestCase):

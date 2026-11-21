@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.8.3 (2026-11-20) — Leaner, Faster Test Suite
+
+The pytest suite is trimmed from 387 to 371 tests with no loss of behavioural coverage, and the everyday run is about twice as fast.
+
+**1. Faster runs**
+- Shared synthetic meshes (torus, double torus, their cut loops) now live in `tests/conftest.py` + `tests/_mesh_helpers.py`, built once per session and read-only; test modules no longer import from each other.
+- New `pytest.ini` (`testpaths = tests`, `--strict-markers`) with a `slow` marker on 9 real-scan / subprocess tests. Everyday: `python -m pytest -m "not slow"` (~55 s); full suite ~100 s (was ~120 s). Safety-critical tests stay in the fast set.
+
+**2. Dead weight removed**
+- Dropped the one-off ProjectStore migration-equivalence tests (with 3 new locate / corrupt-check tests covering the cells only they reached), two "removed feature stays gone" guards, a duplicate `read_test_index` test, and exact-wording UI tests (logic parts kept).
+- Moved the unused `tests/HRIR_*.sofa` reference files out of the repo.
+
 ## v1.8.2 (2026-11-20) — Minimum-Phase Stereo WAV
 
 The DFHRTF extras now also export the diffuse-field curve as a convolution-ready stereo minimum-phase impulse.

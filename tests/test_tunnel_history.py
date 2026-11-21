@@ -7,7 +7,7 @@ import pytest
 
 import mesh_problem_viewer as mpv
 import project_store as ps
-from test_tunnel_stage3 import make_selector, torus, pair, confirm_all  # noqa: F401 (fixtures)
+from _mesh_helpers import make_selector, confirm_all
 
 
 def _events(d):
@@ -86,15 +86,6 @@ def test_keep_records_event_and_undo_records_event(tmp_path, torus, pair):  # no
         or len(d["chosen_linking"]) == 2
     assert d["other_linking"] is not None and len(d["other_linking"]) == 2
     assert os.path.exists(os.path.join(str(tmp_path), "cutpatch_report.json"))
-
-
-def test_history_has_no_via_or_recommended_field(tmp_path, torus, pair):  # noqa: F811
-    sel, mesh = make_selector(tmp_path, torus, pair, runner=False, previews=False)
-    confirm_all(sel)
-    sel.request_apply()
-    sel.keep()
-    ev = _events(tmp_path)[0]
-    assert "via" not in ev and "recommended" not in json.dumps(ev)
 
 
 def test_history_failure_never_blocks_keep_or_undo(tmp_path, torus, pair, monkeypatch):  # noqa: F811
