@@ -7,7 +7,7 @@ import math
 bl_info = {
     "name": "Mesh2SOFA Automation",
     "author": "Mesh2SOFA",
-    "version": (1, 2, 1),
+    "version": (1, 3, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Mesh2SOFA",
     "description": "Automates material assignment, skin/hair boundary conditions and project export for Mesh2HRTF",
@@ -63,14 +63,31 @@ MATERIALS_SUBFOLDER = "Materials"
 DEFAULT_M2H_PATH = r'C:\Mesh2HRTF\mesh2hrtf'
 DEFAULT_GRID = 'Default'
 
-# project_resolution -> (max_hz, step_hz). The add-on can't import core, so this
-# mirrors RESOLUTION_MODES in core/project_store.py -- keep the two in sync
+# project_resolution -> nominal max_hz, plus the selectable frequency step. The
+# add-on can't import core, so this mirrors RESOLUTION_MODES / STEP_SIZES /
+# normalize_step / frequency_plan in core/project_store.py -- keep them in sync
 # (tests/test_resolution_modes.py checks they match).
-RESOLUTION_MODES = {
-    "lowres":   (16050, 150),
-    "standard": (18000, 150),
-    "hires":    (20000, 100),
+NOMINAL_MAX_HZ = {
+    "lowres":   16050,
+    "standard": 18000,
+    "hires":    20000,
 }
+STEP_SIZES = (150, 100)
+DEFAULT_STEP_HZ = 150
+
+
+def normalize_step(value):
+    """150 or 100 (int, or a float equal to one); anything else -> 150."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_STEP_HZ
+    return int(value) if value in STEP_SIZES else DEFAULT_STEP_HZ
+
+
+def frequency_range(resolution, step_hz):
+    """(max_hz, step_hz); max is floored onto the step grid."""
+    nominal = NOMINAL_MAX_HZ.get(resolution, NOMINAL_MAX_HZ["standard"])
+    step = normalize_step(step_hz)
+    return (nominal // step) * step, step
 
 EXPORT_JOBS = [
     {
@@ -360,7 +377,8 @@ def get_project_settings():
     settings = {
         "m2h_path": DEFAULT_M2H_PATH,
         "grid": DEFAULT_GRID,
-        "resolution": "standard"
+        "resolution": "standard",
+        "step": DEFAULT_STEP_HZ
     }
 
     # Load app settings
@@ -382,6 +400,11 @@ def get_project_settings():
                 data = json.load(f)
                 settings["grid"] = data.get("eval_grid", DEFAULT_GRID)
                 settings["resolution"] = data.get("project_resolution", "standard")
+                if "step_size" in data:
+                    raw_step = data["step_size"]
+                    settings["step"] = normalize_step(raw_step)
+                    if settings["step"] != raw_step:
+                        print(f"[Warning] Invalid step_size {raw_step!r} in project.json; using {DEFAULT_STEP_HZ} Hz.")
         except: pass
 
     settings["m2h_path"] = validate_m2h_path(settings["m2h_path"])
@@ -652,11 +675,11 @@ def run_smart_export():
 
     # DETERMINE FREQUENCY RANGE
     resolution = config["resolution"]
-    if resolution not in RESOLUTION_MODES:
+    if resolution not in NOMINAL_MAX_HZ:
         print(f"[Warning] Unknown project_resolution '{resolution}'; using standard.")
         resolution = "standard"
-    max_freq, step_freq = RESOLUTION_MODES[resolution]
-    print(f"Mode: {resolution} (Max {max_freq}Hz, {step_freq}Hz steps)")
+    max_freq, step_freq = frequency_range(resolution, config["step"])
+    print(f"Mode: {resolution} @ {step_freq} Hz steps (Max {max_freq}Hz)")
 
     if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')

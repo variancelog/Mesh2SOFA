@@ -18,7 +18,8 @@ if CORE_DIR not in sys.path:
 
 import app_settings
 from project_store import (ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED,
-                           RESOLUTION_MODES, resolution_mode)
+                           RESOLUTION_MODES, resolution_mode, DEFAULT_STEP_HZ,
+                           normalize_step, frequency_plan, export_step_hz)
 from inspect_flow import InspectFlow, step2_state
 
 # Hide the console window so running as .py looks like .pyw (no terminal).
@@ -253,9 +254,74 @@ class TiltSettingsDialog(ctk.CTkToplevel):
         except ValueError:
             messagebox.showerror("Error", "Please enter a valid number for tilt (e.g. -1.0 or 0).")
 
+def step_summary(mode, step):
+    """One-line description of the frequency plan for a mode and step, e.g.
+    'Standard @ 100 Hz: 180 frequencies up to 18 kHz, 512-sample SOFAs'."""
+    plan = frequency_plan(mode, step)
+    name = resolution_mode(mode)["label"].split(" (")[0]
+    smp = 512 if plan["double_length"] else 256
+    return (f"{name} @ {plan['step_hz']} Hz: {plan['num_freqs']} frequencies "
+            f"up to {plan['max_hz'] / 1000:g} kHz, {smp}-sample SOFAs")
+
+
+class StepSizeDialog(ctk.CTkToplevel):
+    """Popup to choose the per-project frequency step (150 / 100 Hz)."""
+    def __init__(self, parent, current_step, mode, base_path, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.mode = mode
+        self.export_step = export_step_hz(base_path) if base_path else None
+        self.title("Frequency Step Size")
+        self.geometry("440x330")
+
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus()
+
+        ctk.CTkLabel(self, text="Frequency Step Size", font=("Roboto Medium", 16)).pack(pady=(15, 8))
+
+        self.seg = ctk.CTkSegmentedButton(self, values=["150 Hz", "100 Hz"], command=self._refresh)
+        self.seg.pack(pady=5)
+        self.seg.set(f"{normalize_step(current_step)} Hz")
+
+        ctk.CTkLabel(
+            self, wraplength=390, justify="left",
+            text=("150 Hz is sufficient for DFHRTF. 100 Hz gives a finer frequency grid "
+                  "and 512-sample SOFAs, but simulates 1.5x more frequencies (about 1.5x "
+                  "NumCalc time and more total disk).")).pack(pady=8, padx=20)
+
+        self.lbl_summary = ctk.CTkLabel(self, wraplength=390, justify="left")
+        self.lbl_summary.pack(pady=4, padx=20)
+        self.lbl_export = ctk.CTkLabel(self, wraplength=390, justify="left", text_color="#E0A030")
+        self.lbl_export.pack(pady=4, padx=20)
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(pady=12)
+        ctk.CTkButton(row, text="Apply", fg_color="green", width=100, command=self.on_apply).pack(side="left", padx=8)
+        ctk.CTkButton(row, text="Cancel", width=100, command=self.destroy).pack(side="left", padx=8)
+        self._refresh()
+
+    def _selected(self):
+        return 100 if self.seg.get().startswith("100") else 150
+
+    def _refresh(self, _value=None):
+        step = self._selected()
+        self.lbl_summary.configure(text=step_summary(self.mode, step))
+        if self.export_step is not None and self.export_step != step:
+            self.lbl_export.configure(text=(
+                f"The existing export uses {self.export_step} Hz. Delete Exports/Left_Project "
+                "and Right_Project and re-export from Blender."))
+        else:
+            self.lbl_export.configure(text="")
+
+    def on_apply(self):
+        self.callback(self._selected())
+        self.destroy()
+
+
 class VTKSettingsDialog(ctk.CTkToplevel):
     """Popup window for VTK Export (Frequency Range)"""
-    def __init__(self, parent, callback):
+    def __init__(self, parent, callback, export_info=""):
         super().__init__(parent)
         self.callback = callback
         self.title("Generate Paraview VTK Files")
@@ -266,7 +332,9 @@ class VTKSettingsDialog(ctk.CTkToplevel):
         self.focus()
         
         self.lbl = ctk.CTkLabel(self, text="VTK Export Settings", font=("Roboto Medium", 16))
-        self.lbl.pack(pady=20)
+        self.lbl.pack(pady=(20, 5 if export_info else 20))
+        if export_info:
+            ctk.CTkLabel(self, text=export_info).pack(pady=(0, 5))
 
         self.frame = ctk.CTkFrame(self)
         self.frame.pack(pady=10, padx=20, fill="x")
@@ -450,6 +518,7 @@ class HRTFProjectManager(ctk.CTk):
         self.project_data = {
             "base_path": "",
             "project_resolution": "standard", # Default: standard | lowres | hires
+            "step_size": DEFAULT_STEP_HZ,     # Frequency step: 150 (default) | 100
             "scripts_path": os.path.dirname(os.path.abspath(__file__)),       
             "eval_grid": "",                   
             "raw_scan": "",
@@ -537,6 +606,11 @@ class HRTFProjectManager(ctk.CTk):
         )
         self.seg_mode.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
         self.seg_mode.set(_MODE_LABELS["standard"])  # default; updated in update_ui_from_data
+
+        self.btn_step = ctk.CTkButton(tab_proj, text=f"Step: {DEFAULT_STEP_HZ} Hz", width=80,
+                                      command=self.open_step_dialog)
+        self.btn_step.grid(row=0, column=2, padx=10, pady=5)
+        Tooltip(self.btn_step, "Frequency step size for the simulation.")
 
         # Tooltips are attached after the widget is rendered so _buttons_dict is populated.
         self.after(100, self._attach_mode_tooltips)
@@ -766,6 +840,21 @@ class HRTFProjectManager(ctk.CTk):
         self.log(f"Project Resolution set to: {new_res.upper()}")
         self.save_project_json(silent=True)
 
+    def _refresh_step_button(self):
+        step = normalize_step(self.project_data.get("step_size", DEFAULT_STEP_HZ))
+        self.btn_step.configure(text=f"Step: {step} Hz")
+
+    def open_step_dialog(self):
+        mode = self.project_data.get("project_resolution", "standard")
+        step = normalize_step(self.project_data.get("step_size", DEFAULT_STEP_HZ))
+        StepSizeDialog(self, step, mode, self.entry_base.get(), self.update_step).grab_set()
+
+    def update_step(self, step):
+        self.project_data["step_size"] = normalize_step(step)
+        self.log(f"Frequency step set to: {self.project_data['step_size']} Hz")
+        self.save_project_json(silent=True)
+        self._refresh_step_button()
+
     def on_mode_changed(self, label):
         """Called when the user clicks a segment on the Project Mode toggle."""
         value = self._mode_label_to_value.get(label, "standard")
@@ -783,9 +872,9 @@ class HRTFProjectManager(ctk.CTk):
                 "Lower mesh resolution — uses less RAM and runs faster."
             ),
             RESOLUTION_MODES["hires"]["label"]: (
-                "HiRes mode: outputs up to 20 kHz in 100 Hz steps, 512-sample SOFAs.\n"
+                "HiRes mode: outputs up to 20 kHz (19.95 kHz at 150 Hz steps).\n"
                 "Same mesh as Standard — 18–20 kHz accuracy is experimental.\n"
-                "~2× NumCalc time, more RAM at top frequencies."
+                "More RAM at top frequencies."
             ),
         }
         try:
@@ -829,6 +918,8 @@ class HRTFProjectManager(ctk.CTk):
                     self.log(f"Error creating {folder}: {e}")
         
         self.log(f"Project created at: {target_dir}")
+        self.project_data["step_size"] = DEFAULT_STEP_HZ
+        self._refresh_step_button()
         self.entry_base.delete(0, "end")
         self.entry_base.insert(0, target_dir)
         self._set_entry_raw()
@@ -1135,6 +1226,7 @@ class HRTFProjectManager(ctk.CTk):
         # Sync resolution toggle
         res = d.get("project_resolution", "standard")
         self.seg_mode.set(self._mode_value_to_label.get(res, RESOLUTION_MODES["standard"]["label"]))
+        self._refresh_step_button()
         self.update_workflow_state()
 
     def load_project_json(self):
@@ -1149,15 +1241,22 @@ class HRTFProjectManager(ctk.CTk):
                 if k in self.project_data:
                     del self.project_data[k]
 
-            if "project_resolution" not in self.project_data:
+            # Decide on the FILE dict: self.project_data still holds the previous
+            # project's values after update().
+            if "project_resolution" not in data:
                 self.project_data["project_resolution"] = "standard"
+            if "step_size" in data:
+                self.project_data["step_size"] = normalize_step(data["step_size"])
+            else:
+                self.project_data["step_size"] = DEFAULT_STEP_HZ
+                self.log(f"No step size in project.json; using {DEFAULT_STEP_HZ} Hz")
 
             # base_path is authoritative from the file's own location, so the
             # project folder can be moved/renamed without breaking anything.
             self.project_data["base_path"] = base
 
             self.update_ui_from_data()
-            self.log(f"Loaded project: {path} ({self.project_data['project_resolution']})")
+            self.log(f"Loaded project: {path} ({self.project_data['project_resolution']}, {self.project_data['step_size']} Hz)")
             # Self-heal: write the corrected base_path back to disk immediately.
             self.save_project_json(silent=True)
         except Exception as e:
@@ -1616,27 +1715,32 @@ class HRTFProjectManager(ctk.CTk):
         if not numcalc_exe: return self.log("[ERROR] NumCalc.exe not found.")
 
         res_mode = self.project_data.get("project_resolution", "standard")
-        freq_label = f"{resolution_mode(res_mode)['max_hz'] / 1000:g} kHz"
+        step = normalize_step(self.project_data.get("step_size", DEFAULT_STEP_HZ))
+        freq_label = f"{frequency_plan(res_mode, step)['max_hz'] / 1000:g} kHz"
 
-        if not self._check_export_matches_mode(res_mode):
-            self.log("--> NumCalc cancelled (export does not match the project mode).")
+        if not self._check_export_matches_project():
+            self.log("--> NumCalc cancelled (export does not match the project settings).")
             return
 
         def on_choice(action):
             if action == "test":
                 self._run_numcalc_test(numcalc_exe, freq_label)
             elif action == "full":
-                self._run_numcalc_full(numcalc_exe, res_mode)
+                self._run_numcalc_full(numcalc_exe, res_mode, step)
 
         NumCalcOptionsDialog(self, freq_label, on_choice)
 
-    def _check_export_matches_mode(self, res_mode):
+    def _check_export_matches_project(self):
         """Compare the Blender export's frequency range (both ears'
-        parameters.json) with the project mode. Always logs what it found; on a
-        mismatch asks warn-but-allow. Returns False only if the user cancels."""
-        mode = resolution_mode(res_mode)
-        mode_name = mode["label"].split(" (")[0]
-        want = f"{mode['max_hz'] / 1000:g} kHz / {mode['step_hz']:g} Hz"
+        parameters.json) with the project's mode and step. Always logs what it
+        found; on a mismatch asks warn-but-allow. Returns False only if the user
+        cancels."""
+        res_mode = self.project_data.get("project_resolution", "standard")
+        step = normalize_step(self.project_data.get("step_size", DEFAULT_STEP_HZ))
+        plan = frequency_plan(res_mode, step)
+        mode_name = resolution_mode(res_mode)["label"].split(" (")[0]
+        want = f"{plan['max_hz'] / 1000:g} kHz / {plan['step_hz']:g} Hz"
+        project = f"{mode_name} @ {step} Hz"
         base_folder = os.path.normpath(self.entry_base.get())
         found, mismatched = [], []
         for side in ("Left", "Right"):
@@ -1654,18 +1758,19 @@ class HRTFProjectManager(ctk.CTk):
                 continue
             got = f"{max_hz / 1000:g} kHz / {step_hz:g} Hz"
             found.append(f"{side}: {got}")
-            if abs(max_hz - mode["max_hz"]) > 0.5 or abs(step_hz - mode["step_hz"]) > 0.5:
+            if abs(max_hz - plan["max_hz"]) > 0.5 or abs(step_hz - plan["step_hz"]) > 0.5:
                 mismatched.append(f"{side} export is {got}")
 
-        self.log(f"[i] Export frequency range: {'; '.join(found)} (project mode {mode_name}: {want})")
+        self.log(f"[i] Export frequency range: {'; '.join(found)} (project {project}: {want})")
         if not mismatched:
             return True
         return messagebox.askyesno(
-            "Export does not match project mode",
-            f"{'; '.join(mismatched)}, but the project mode is {mode_name} ({want}).\n\n"
+            "Export does not match project settings",
+            f"{'; '.join(mismatched)}, but the project is {project} ({want}).\n\n"
             "Delete Exports/Left_Project and Exports/Right_Project and re-export from "
             "Blender (Mesh2HRTF will not overwrite an existing export). If it still "
-            "mismatches, reinstall the Mesh2SOFA add-on in Blender.\n\n"
+            "mismatches, reinstall the Mesh2SOFA add-on in Blender (add-on v1.3.0 or "
+            "later is needed for the step size).\n\n"
             "Run NumCalc on the current export anyway?",
             icon="warning", parent=self)
 
@@ -1684,11 +1789,11 @@ class HRTFProjectManager(ctk.CTk):
                left_proj, right_proj]
         self.run_external_command(cmd)
 
-    def _run_numcalc_full(self, numcalc_exe, res_mode):
+    def _run_numcalc_full(self, numcalc_exe, res_mode, step):
         base_folder = os.path.normpath(self.entry_base.get())
         self.log(f"[i] Boundary condition in export: "
                  f"{describe_export_boundary(os.path.join(base_folder, 'Exports', 'Left_Project'))}")
-        self.log(f"--> Starting Full Simulation ({res_mode.upper()})...")
+        self.log(f"--> Starting Full Simulation ({res_mode.upper()} @ {step} Hz)...")
 
         m2h_input_path = self.get_valid_m2h_input_path()
         if not m2h_input_path: return self.log("[ERROR] Mesh2Input not found.")
@@ -1729,8 +1834,11 @@ class HRTFProjectManager(ctk.CTk):
         
         self.log("--> Generating SOFA Files...")
         cmd = [sys.executable, "-u", script_path, "--left", left_proj, "--right", right_proj, "--m2h_path", m2h_root, "--output", output_dir]
-        if resolution_mode(self.project_data.get("project_resolution", "standard"))["double_length"]:
-            cmd.append("--double-length")  # HiRes: 512-sample SOFAs
+        if export_step_hz(base_folder) == 100:
+            cmd.append("--double-length")
+            self.log("[i] 512-sample SOFAs (export is 100 Hz)")
+        else:
+            self.log("[i] 256-sample SOFAs")
         self.run_external_command(cmd)
 
     def open_tilt_dialog(self):
@@ -1761,7 +1869,15 @@ class HRTFProjectManager(ctk.CTk):
         self.run_sequential_commands(cmds)
 
     def open_vtk_dialog(self):
-        VTKSettingsDialog(self, self.run_vtk_script).grab_set()
+        base_folder = os.path.normpath(self.entry_base.get())
+        info = ""
+        try:
+            with open(os.path.join(base_folder, "Exports", "Left_Project", "parameters.json"), "r") as fh:
+                p = json.load(fh)
+            info = f"Export grid: {float(p['frequencyStepSize']):g} Hz steps, up to {float(p['maxFrequency']):g} Hz"
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        VTKSettingsDialog(self, self.run_vtk_script, info).grab_set()
 
     def run_vtk_script(self, min_freq, max_freq):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))

@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.9.0 (2026-11-25) — Frequency Step Setting, More Evaluation Grids & Docs
+
+The frequency step becomes its own project setting (150 or 100 Hz) for every resolution mode, the
+repo gains evaluation grids matching five measured HRTF datasets, the standalone SOFA Mastering Tool
+is retired in favour of SOFA Buddy, and the documentation is brought up to date.
+
+**1. Frequency step setting (Blender add-on v1.3.0)**
+- New **Step** button on the Project Settings tab (`StepSizeDialog`): 150 Hz (default) or 100 Hz, stored
+  as `step_size` in `project.json`. The dialog shows the resulting plan (e.g. "Standard @ 100 Hz: 180
+  frequencies up to 18 kHz, 512-sample SOFAs") and warns when the existing export uses another step.
+- The step is no longer tied to the mode. **HiRes now defaults to 150 Hz** (133 frequencies up to
+  19.95 kHz, 256-sample SOFAs) instead of 100 Hz; choose 100 Hz for the previous HiRes behaviour.
+  Projects saved before this setting open at 150 Hz.
+- `core/project_store.py`: `STEP_SIZES`, `DEFAULT_STEP_HZ`, `normalize_step`, `frequency_plan(mode, step)`
+  (max = nominal max floored onto the step grid) and `export_step_hz(base)`.
+- Step 7 writes 512-sample SOFAs when the *export* is 100 Hz (read from `parameters.json`), 256 otherwise,
+  and logs which.
+- The pre-NumCalc check now compares the export with the project mode **and** step.
+- The VTK dialog shows the export's step and maximum frequency.
+- **Blender add-on v1.3.0** reads `step_size` from `project.json`. **Re-install the add-on in Blender**;
+  an older add-on ignores the step.
+- Fix: opening a project whose `project.json` has no `project_resolution` no longer inherits the mode of
+  the previously open project.
+- Tests: `tests/test_step_summary.py`, `tests/test_vtk_freq_steps.py`, updated
+  `tests/test_resolution_modes.py` (core and add-on agree for every mode and step) and
+  `tests/test_project_store.py`.
+
+**2. Evaluation grids**
+- New grids matching measured HRTF datasets: `COAT-AACHEN_3072`, `HUTUBS_440`, `RIEC_865`, `SS2_1625`
+  (each with a `source_map.txt` linking grid nodes to the dataset's SOFA positions), plus copies of
+  Mesh2HRTF's `Default` and `ARI` for their previews.
+- `N-Design_55` renamed to `N-Design_56` (same 1620 points).
+- Preview images now show the diffuse-field weight of each point.
+- Removed the helper scripts `generate_n_design_grid.py` and `plot_grid.py`.
+- `evaluation_grids/README_evaluation_grids.md` (previously empty) documents the grids, their source
+  datasets and how to install a grid into Mesh2HRTF.
+
+**3. SOFA Mastering Tool removed**
+- `_sofa_mastering_tool.py` is removed; use [SOFA Buddy](https://github.com/variancelog/SOFABuddy), its
+  successor. Step 7 and the DFHRTF extras in the main GUI never used it and are unchanged.
+- `tkinterdnd2` dropped from `requirements.txt` (only the mastering tool needed it).
+
+**4. Documentation**
+- README: new screenshots, Blender 5.1 recommended, `.stl` listed as a raw mesh format, and the
+  previously missing instruction to install Mesh2HRTF's own Blender add-on (`mesh2input.py`).
+- New `readme_blender-addon.md`: full add-on guide (settings sources, exported frequencies, boundary
+  conditions, troubleshooting).
+- `readme_vtk_export.md`: viewer screenshot and standalone launch command.
+
 ## v1.8.3 (2026-11-20) — Leaner, Faster Test Suite
 
 The pytest suite is trimmed from 387 to 371 tests with no loss of behavioural coverage, and the everyday run is about twice as fast.

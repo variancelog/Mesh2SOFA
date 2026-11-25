@@ -7,7 +7,6 @@
 
 # --- GUI ---
 customtkinter
-tkinterdnd2
 
 # --- 3D / visualization ---
 pyvista

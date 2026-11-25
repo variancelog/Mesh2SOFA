@@ -24,20 +24,59 @@ import os
 from enum import Enum
 
 
-# Project resolution modes (project_resolution in project.json). The frequency
-# range lives here; mesh-grading args stay in process_and_grade.py.
-# Keep (max_hz, step_hz) in sync with RESOLUTION_MODES in
-# blender_scripts/mesh2SOFA_blender_addon.py (tests/test_resolution_modes.py checks it).
+# Project resolution modes (project_resolution in project.json). The mode owns the
+# GUI label and the *nominal* top frequency (what the mesh is graded for); the
+# frequency step is a separate per-project setting (`step_size`) and the actual
+# frequency plan is frequency_plan(mode, step). Mesh-grading args stay in
+# process_and_grade.py.
+# Keep NOMINAL_MAX_HZ / STEP_SIZES / normalize_step / frequency_range in
+# blender_scripts/mesh2SOFA_blender_addon.py in sync
+# (tests/test_resolution_modes.py checks it).
 RESOLUTION_MODES = {
-    "lowres":   {"max_hz": 16050, "step_hz": 150, "label": "Lowres (16 kHz Max)",   "double_length": False},
-    "standard": {"max_hz": 18000, "step_hz": 150, "label": "Standard (18 kHz Max)", "double_length": False},
-    "hires":    {"max_hz": 20000, "step_hz": 100, "label": "HiRes (20 kHz Max)",    "double_length": True},
+    "lowres":   {"max_hz": 16050, "label": "Lowres (16 kHz Max)"},
+    "standard": {"max_hz": 18000, "label": "Standard (18 kHz Max)"},
+    "hires":    {"max_hz": 20000, "label": "HiRes (20 kHz Max)"},
 }
+
+STEP_SIZES = (150, 100)
+DEFAULT_STEP_HZ = 150
 
 
 def resolution_mode(name):
-    """Settings dict for a project_resolution name; unknown -> standard."""
+    """Settings dict (label, nominal max_hz) for a project_resolution name;
+    unknown -> standard."""
     return RESOLUTION_MODES.get(name, RESOLUTION_MODES["standard"])
+
+
+def normalize_step(value):
+    """150 or 100 (int, or a float equal to one); anything else -> 150."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_STEP_HZ
+    return int(value) if value in STEP_SIZES else DEFAULT_STEP_HZ
+
+
+def frequency_plan(resolution, step_hz):
+    """Frequency plan for a mode and step: max_hz (nominal max floored onto the
+    step grid), step_hz, num_freqs and double_length (512-sample SOFAs, needed
+    when the HRIR spans 1/step = 10 ms, i.e. step == 100)."""
+    step = normalize_step(step_hz)
+    max_hz = (resolution_mode(resolution)["max_hz"] // step) * step
+    return {"max_hz": max_hz, "step_hz": step, "num_freqs": max_hz // step,
+            "double_length": step == 100}
+
+
+def export_step_hz(base):
+    """Step (Hz) of the existing export under <base>/Exports/Left_Project, read
+    from its parameters.json `frequencyStepSize`; None if there is no export, the
+    file is unreadable, or the step is not one of STEP_SIZES."""
+    path = os.path.join(base, "Exports", "Left_Project", "parameters.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)["frequencyStepSize"]
+        step = normalize_step(raw)
+        return step if step == raw else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 class CleanState(Enum):

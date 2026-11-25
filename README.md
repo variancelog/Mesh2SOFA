@@ -4,7 +4,7 @@ An unofficial Python-based GUI orchestrator for [Mesh2HRTF](https://github.com/M
 
 > **Note:** This is an unofficial orchestrator and is not directly affiliated with the Mesh2HRTF project.
 
-![Mesh2SOFA Screenshot](screenshot_mesh2sofa.png?v=2)
+![Mesh2SOFA Screenshot](screenshot_mesh2sofa_1-9-0.png)
 
 ## Features
 
@@ -28,7 +28,7 @@ To use this orchestrator, you must have the following installed:
 2.  **[Mesh2HRTF](https://sourceforge.net/projects/mesh2hrtf/)** including compiled NumCalc and Mesh Grading Tool executables.
     - NOTE: Make sure to compile NumCalc from source - the Windows binaries on mesh2HRTF-tools for Windows are outdated.
     - NumCalc binaries should be in the `Mesh2HRTF/NumCalc/bin` folder
-3.  **[Blender](https://www.blender.org/)** (4.5 LTS recommended) — required for the mesh import step and for Step 4.
+3.  **[Blender](https://www.blender.org/)** (5.1 recommended; 4.0 or later) — required for the mesh import step and for Steps 4–5. Mesh2HRTF's own Blender add-on must be installed in it (see Installation step 4).
 4.  **Additional Python Libraries** outlined below.
 
 ## Installation
@@ -50,12 +50,14 @@ To use this orchestrator, you must have the following installed:
         * Navigate to: `path/to/Mesh2HRTF/mesh2hrtf/Mesh2Input/Meshes/GradingDistanceBased`
         * Build the project using CMake (referenced by the `CMakeLists.txt` in that folder).
 
-4. **Install the Blender Add-on (Initial Setup only):**
+4. **Install the Blender Add-ons (Initial Setup only):**
     * Open Blender.
     * Go to **Edit > Preferences > Add-ons**.
-    * Click **Install From Disk...** from the mini drop-down menu and select `blender_scripts/mesh2SOFA_blender_addon.py` from this repository.
+    * Click **Install From Disk...** from the mini drop-down menu, select `mesh2hrtf/Mesh2Input/mesh2input.py` from your Mesh2HRTF folder and enable it. This is Mesh2HRTF's own add-on; the Mesh2SOFA export needs it.
+    * Click **Install From Disk...** again and select `blender_scripts/mesh2SOFA_blender_addon.py` from this repository.
     * Search for "Mesh2SOFA Automation" in the list and enable it by checking the box (it should be checked by default).
     * The **Mesh2SOFA** panel will now always be available in the 3D Viewport sidebar (press 'N' to open the sidebar, or enable it from the "View" menu).
+    * Blender keeps its own copy of the add-on: re-install it after a Mesh2SOFA update that changes the add-on version (currently v1.3.0). See [readme_blender-addon.md](readme_blender-addon.md).
 
 ### Where settings are stored
 
@@ -67,7 +69,7 @@ ships `app_settings.template.json` as a key reference. The first run imports any
 
 *Upgrading from GitHub:* if you edited `app_settings.json`, `git pull` will refuse ("local changes would be
 overwritten"). Move `app_settings.json` out of the repo folder, pull, then put it back; the first run imports it.
-If you never edited it, nothing is lost. The Blender add-on is now v1.2.1 (it reads the per-user file): re-install it
+If you never edited it, nothing is lost. The Blender add-on is now v1.3.0 (it reads the per-user file): re-install it
 in Blender.
 
 ## Usage
@@ -81,14 +83,15 @@ in Blender.
     * Create a New Project or Open an existing Project.
     * If your computer has limited RAM (e.g. 8-16GB), select the "Lowres" option from the Project Settings. This will use a slightly lower resolution graded mesh and calculate the HRTF only up to 16 kHz to save on RAM, but will still produce 44.1 kHz and 48 kHz SOFA files through upsampling.
       * NOTE: Limited RAM users are encouraged to use a shoulderless/torsoless mesh to greatly reduce RAM usage during simulation.
-    * Select "HiRes" to calculate up to 20 kHz in 100 Hz steps (200 frequencies instead of 120) and write 512-sample SOFA files. It uses the same graded mesh as Standard, so accuracy in the 18–20 kHz band is **experimental**. Expect roughly 2× (or more) NumCalc time and higher peak RAM at the top frequencies.
-    * Changing the mode after exporting from Blender needs a fresh export: delete `Exports/Left_Project` and `Exports/Right_Project` first (Mesh2HRTF will not overwrite an existing export), then export again. Before NumCalc runs, the GUI checks both exports against the project mode and warns on a mismatch. HiRes needs Mesh2SOFA add-on v1.2.0 or later — if the warning persists after re-exporting, reinstall the add-on in Blender.
+    * Select "HiRes" to calculate up to 20 kHz (19.95 kHz at the default 150 Hz step). It uses the same graded mesh as Standard, so accuracy in the 18–20 kHz band is **experimental**. Expect higher peak RAM at the top frequencies.
+    * The **Step** button (Project Settings, default 150 Hz) sets the frequency step for the simulation. 150 Hz is sufficient for DFHRTF; 100 Hz gives a finer grid and 512-sample SOFA files, but simulates 1.5× more frequencies (about 1.5× NumCalc time). Changing the step after exporting from Blender needs a fresh export (see below). Projects saved before this setting existed open at 150 Hz.
+    * Changing the mode after exporting from Blender needs a fresh export: delete `Exports/Left_Project` and `Exports/Right_Project` first (Mesh2HRTF will not overwrite an existing export), then export again. Before NumCalc runs, the GUI checks both exports against the project mode and step and warns on a mismatch. The step setting needs Mesh2SOFA add-on v1.3.0 or later — if the warning persists after re-exporting, reinstall the add-on in Blender.
     * Under **App Settings**, configure your Mesh2HRTF root folder, **Blender executable** path (required — used both for mesh import and Step 4), and the **Mesh Grading Tool** binary.
-    * Under **Project Settings**, select your **Evaluation Grid(s)** and resolution mode.
+    * Under **Project Settings**, select your **Evaluation Grid(s)** and resolution mode. The list shows the grids in your Mesh2HRTF folder (`Mesh2Input/EvaluationGrids/Data`). Extra grids ship in `evaluation_grids/`; copy a grid folder there to use it (see [README_evaluation_grids.md](evaluation_grids/README_evaluation_grids.md)).
 
 3.  **Workflow:**
 
-    * **Browse for Raw Mesh** is the entry point for your 3D head scan (`.obj` or `.ply`). Clicking Browse prompts you to Move or Copy the file into the project, then automatically runs a full cleaning pipeline: it inspects for defects, removes tiny sliver triangles via Blender, and repairs structural issues with pymeshfix. A popup summarises the result. If a see-through hole (a topological tunnel) is detected, you will see a warning — it can only be fixed after alignment in Step 2. The Raw Mesh field is read-only; Browse is the only way to set it.
+    * **Browse for Raw Mesh** is the entry point for your 3D head scan (`.obj`, `.ply` or `.stl`). Clicking Browse prompts you to Move or Copy the file into the project, then automatically runs a full cleaning pipeline: it inspects for defects, removes tiny sliver triangles via Blender, and repairs structural issues with pymeshfix. A popup summarises the result. If a see-through hole (a topological tunnel) is detected, you will see a warning — it can only be fixed after alignment in Step 2. The Raw Mesh field is read-only; Browse is the only way to set it.
 
     * **1. Align Mesh** stays greyed out until a raw mesh has been imported and its cleaning pipeline has finished. It opens an interactive 3D viewer. In Phase 1, pick three landmarks: Left Ear, Right Ear, and Nose Tip. In Phase 2, use a slider to fine-tune the pitch (tilt) of the head to ensure it is level.
 
@@ -106,9 +109,11 @@ in Blender.
 
     * **EXTRAS:**
       * **Generate DFHRTF Files** generates tilted diffuse-field responses as CSV files for left, right, and average channels, plus frequency response plots. You can specify a tilt value (e.g. -1.0 dB/octave) and run it multiple times to test different outputs. It also writes a convolution-ready stereo minimum-phase impulse of the same curve (`... MinPhase.wav`, 2 ch, 4096 samples, 32-bit float).
-      * **Generate Paraview VTK Files** exports pressure data from your simulation into VTK format for a specified frequency range. Use the included `_vtk_viewer.py` tool (or ParaView) to interactively visualize the acoustic pressure fields around the head model.
+      * **Generate Paraview VTK Files** exports pressure data from your simulation into VTK format for a specified frequency range. Use the included `_vtk_viewer.py` tool (or ParaView) to interactively visualize the acoustic pressure fields around the head model (see [readme_vtk_export.md](readme_vtk_export.md)).
 
 ## Blender Steps
+
+![Blender Add-on Screenshot](screenshot_blender_addon_1-3-0.png)
 
 Once the Blender Add-on is installed (see Installation step 4), use the **Mesh2SOFA** panel in the 3D Viewport sidebar to complete Step 5:
 
@@ -127,10 +132,22 @@ Once the Blender Add-on is installed (see Installation step 4), use the **Mesh2S
    - These settings are saved in the `.blend` file. If hair is off, any painted hair region is exported as skin (the painting itself is kept).
 5. **Step 2: Export Projects.** Click `Export Projects`. This generates the two project folders needed by NumCalc in your project's `Exports` folder. The add-on then checks the generated `NC.inp` files to confirm the selected boundary condition was actually written, and the success message names it (e.g. "Boundary: skin absorption + hair (m=11)"). The main GUI also logs the boundary condition when you start the NumCalc test or full simulation.
 
-If there are errors or missing output in the `Exports` folder, check the Blender system console for details. Common issues include `Left_Graded` or `Right_Graded` meshes missing from the scene.
+If there are errors or missing output in the `Exports` folder, check the Blender system console for details. Common issues include `Left_Graded` or `Right_Graded` meshes missing from the scene. [readme_blender-addon.md](readme_blender-addon.md) has the full add-on guide, including where it reads its settings and a troubleshooting table.
+
+## More Documentation
+
+* [readme_blender-addon.md](readme_blender-addon.md) — the Blender add-on in detail.
+* [evaluation_grids/README_evaluation_grids.md](evaluation_grids/README_evaluation_grids.md) — the extra evaluation grids and how to install them.
+* [core/readme_dfhrtf_calculation.md](core/readme_dfhrtf_calculation.md) — how the diffuse-field HRTF is calculated.
+* [readme_vtk_export.md](readme_vtk_export.md) — how the VTK export works.
+* [CHANGELOG.md](CHANGELOG.md) — version history.
+
+## Related Tools
+
+* **[SOFA Buddy](https://github.com/variancelog/SOFABuddy)** — standalone tool for working with existing SOFA files (mastering, DFHRTF and more). It replaces the SOFA Mastering Tool that used to ship with Mesh2SOFA ([note](readme_sofa_mastering_tool.md)).
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see [LICENSE.md](LICENSE.md) for details.
 
 **Note:** This is an unofficial orchestrator and is not directly affiliated with the Mesh2HRTF project.

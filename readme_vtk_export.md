@@ -1,5 +1,7 @@
 # VTK Export Workflow in Mesh2SOFA
 
+![VTK Viewer](screenshot_vtk_viewer.png)
+
 Here is a step-by-step breakdown of how the VTK export workflow operates in Mesh2SOFA:
 
 ### 1. User Input (The GUI)
@@ -35,4 +37,10 @@ Once Mesh2HRTF finishes generating the raw files, the script organizes them for 
 *   **Renaming:** It walks through these copied files looking for the generic `frequency_step_N.vtk` naming convention. 
 *   It extracts the step number (`N`), looks it up in the `step_to_freq_map` to find the correct actual frequency (accounting for the reverse-order quirk), and renames the file to a clean, readable format with leading zeros: **`<frequency>Hz.vtk`** (e.g., `01000Hz.vtk`). 
 
-This ensures the user ends up with a neatly organized `Output/VTK` folder containing accurately named files ready for import into visualization software like ParaView or Mesh2SOFA `_vtk_viewer.py`.
+This ensures the user ends up with a neatly organized `Output/VTK` folder containing accurately named files ready for import into visualization software like ParaView or Mesh2SOFA `_vtk_viewer.py`. A `step_to_freq_map.json` report of the mapping is saved alongside.
+
+### 7. Viewing the Files
+The viewer can also be started on its own; pass the `Output/VTK` folder of a project:
+```bash
+python _vtk_viewer.py <project_base>/Output/VTK
+```

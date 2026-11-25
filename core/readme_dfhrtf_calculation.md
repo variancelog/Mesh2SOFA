@@ -6,7 +6,8 @@ evenly, so a naïve average lets densely-packed regions dominate sparse ones. To
 `generate_extras.py` assigns each direction a **spatial weight** before averaging.
 
 The weighting logic lives in `core/geometry_weights.py`
-(`calculate_geometric_weights`) — a module shared verbatim with the *sofa_buddy* project so
+(`calculate_geometric_weights`) — a module shared verbatim with
+[SOFA Buddy](https://github.com/variancelog/SOFABuddy) so
 both tools weight grids identically. It has two important improvements over a plain
 convex-hull average: **grid-type auto-detection** and a **ghost-node hull** that stays
 correct for open / hemispherical grids.

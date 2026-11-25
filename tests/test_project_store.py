@@ -15,7 +15,8 @@ import unittest
 
 from project_store import (
     ProjectStore, CleanState, MESH_ALIGNED, MESH_GRADED,
-    RESOLUTION_MODES, resolution_mode,
+    RESOLUTION_MODES, resolution_mode, normalize_step, export_step_hz,
+    frequency_plan,
 )
 
 
@@ -214,8 +215,34 @@ class Resolution(unittest.TestCase):
 
     def test_resolution_mode_lookup(self):
         self.assertEqual(resolution_mode("hires")["max_hz"], 20000)
-        self.assertEqual(resolution_mode("hires")["step_hz"], 100)
+        self.assertNotIn("step_hz", resolution_mode("hires"))
         self.assertIs(resolution_mode("bogus"), RESOLUTION_MODES["standard"])
+
+    def test_normalize_step(self):
+        for raw, want in [(150, 150), (100, 100), (100.0, 100), ("100", 150),
+                          (125, 150), (None, 150), (True, 150)]:
+            self.assertEqual(normalize_step(raw), want, raw)
+
+    def test_frequency_plan_unknown_mode_is_standard(self):
+        self.assertEqual(frequency_plan("bogus", 100)["max_hz"], 18000)
+
+    def _write_export(self, root, content):
+        d = os.path.join(root, "Exports", "Left_Project")
+        os.makedirs(d)
+        with open(os.path.join(d, "parameters.json"), "w") as f:
+            f.write(content)
+
+    def test_export_step_hz(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertIsNone(export_step_hz(root))
+        for content, want in [('{"frequencyStepSize": 100}', 100),
+                              ('{"frequencyStepSize": 150.0}', 150),
+                              ('{"frequencyStepSize": 125}', None),
+                              ('{"other": 1}', None),
+                              ('not json', None)]:
+            with tempfile.TemporaryDirectory() as root:
+                self._write_export(root, content)
+                self.assertEqual(export_step_hz(root), want, content)
 
 
 if __name__ == "__main__":
